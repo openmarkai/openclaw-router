@@ -1,0 +1,21 @@
+{
+  "name": "openmark-router",
+  "displayName": "OpenMark AI Router",
+  "description": "Benchmark-driven model routing powered by OpenMark AI. Routes tasks to optimal models based on real evaluation data — accuracy, cost, latency, stability — not keyword heuristics or complexity tiers.",
+  "version": "1.0.0",
+  "author": "openmarkai",
+  "homepage": "https://openmark.ai",
+  "repository": "https://github.com/openmarkai/openclaw-router",
+  "license": "MIT",
+  "tags": [
+    "model-routing",
+    "benchmark",
+    "cost-optimization",
+    "orchestration",
+    "openmark",
+    "data-driven",
+    "dynamic-routing",
+    "cost-efficiency"
+  ],
+  "category": "productivity"
+}

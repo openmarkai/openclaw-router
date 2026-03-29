@@ -1,0 +1,13 @@
+{
+  "available_providers": ["openai", "anthropic", "google", "deepseek", "mistral", "cohere", "xai", "qwen"],
+  "default_model": "google/gemini-3-flash",
+  "classifier_model": null,
+  "routing_strategy": "balanced",
+  "cost_ceiling": null,
+  "latency_ceiling_s": null,
+  "freshness_warning_days": 30,
+  "benchmarks_dir": "benchmarks",
+  "min_completion_pct": 80,
+  "min_stability_threshold": 10.0,
+  "fallback_count": 2
+}

@@ -1,3 +1,7 @@
+# Internal ops/planning docs (not for public repo)
+OPENCLAW_ROUTING_SKILL_PLAN.md
+SYSTEM_DESIGN.md
+
 __pycache__/
 *.pyc
 *.pyo
