@@ -1,7 +1,6 @@
 {
-  "available_providers": ["openai", "anthropic", "google", "deepseek", "mistral", "cohere", "xai", "qwen"],
+  "available_providers": [],
   "default_model": "google/gemini-3-flash",
-  "classifier_model": null,
   "routing_strategy": "balanced",
   "cost_ceiling": null,
   "latency_ceiling_s": null,

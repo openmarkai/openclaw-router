@@ -6,26 +6,30 @@ Reads benchmark CSVs, filters by user config, ranks models by strategy,
 and outputs a JSON recommendation to stdout.
 
 Ranking logic mirrors OpenMark AI's internal model selection:
-- 6-step cascade sort (score → Acc/$ → Acc/min → cost → name)
-- Viability floor (within 15pp of top scorer) for cost-efficiency strategies
-- Tie detection (when ≥80% of models score within 1pp, differentiate on cost)
+- 6-step cascade sort (score -> Acc/$ -> Acc/min -> cost -> name)
+- Viability floor (proportional at low scores, 15pp at high scores)
+- Tie detection (when >=80% of models score within 1pp, differentiate on cost)
 - Best alternative identification (nearly as good, much cheaper)
 
 Usage:
-    python3 router.py --task <category> [--strategy <strategy>] [--config <path>]
+    python3 router.py --task <category> [--strategy <strategy>] [--providers <list>] [--config <path>]
     python3 router.py --list-categories [--config <path>]
+    python3 router.py --describe [--config <path>]
 """
 
 import argparse
 import json
+import subprocess
 import sys
 import os
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from loader import load_csv, load_benchmarks_dir
-from adapter import to_openclaw_id, get_openclaw_provider
+from loader import load_csv, load_benchmarks_dir, validate_csv, detect_duplicates
+from adapter import (
+    to_openclaw_id, get_openclaw_provider, resolve_model_key, PROVIDER_MAP,
+)
 
 VIABILITY_GAP_PP = 15
 ALTERNATIVE_MIN_SAVINGS_PCT = 30
@@ -46,9 +50,14 @@ def filter_entries(entries: list[dict], config: dict) -> list[dict]:
 
     filtered = []
     for e in entries:
-        openclaw_provider = get_openclaw_provider(e["provider"])
-        if available and openclaw_provider not in available:
-            continue
+        if available:
+            resolved = resolve_model_key(
+                e.get("oc_key"), e.get("oc_or_key"), available,
+            )
+            if not resolved:
+                openclaw_provider = get_openclaw_provider(e["provider"])
+                if openclaw_provider not in available:
+                    continue
         if e["completion_pct"] < min_completion:
             continue
         if e["stability"] > max_stability:
@@ -81,7 +90,6 @@ def cascade_sort(entries: list[dict]) -> list[dict]:
             e["acc_per_dollar"],
             e["acc_per_min"],
             -e["cost"],
-            # Reverse alpha: sorted() is ascending, we want A before Z
         ),
         reverse=True,
     )
@@ -89,7 +97,7 @@ def cascade_sort(entries: list[dict]) -> list[dict]:
 
 def detect_tie(entries: list[dict]) -> bool:
     """
-    When ≥80% of models score within 1pp of each other, it's a tie.
+    When >=80% of models score within 1pp of each other, it's a tie.
     In ties, accuracy is meaningless as a differentiator.
     """
     if len(entries) < 2:
@@ -104,16 +112,24 @@ def cost_speed_sort(entries: list[dict]) -> list[dict]:
     return sorted(entries, key=lambda e: (e["cost"], e["time_s"]))
 
 
+def compute_viability_floor(top_score: float) -> float:
+    """
+    Compute the viability floor score.
+
+    Above 30% top score: normal 15pp absolute gap (e.g. 80% -> 65%).
+    Below 30%: proportional floor kicks in -- must score at least half
+    the top model (e.g. 15% -> 7.5%, excluding 0% models).
+    At 0%: floor is 0%, all models equal, differentiate by cost/speed.
+    """
+    return max(top_score - VIABILITY_GAP_PP, top_score * 0.5)
+
+
 def apply_viability_floor(entries: list[dict]) -> list[dict]:
-    """
-    Filter to models within 15pp of the top scorer.
-    The floor is RELATIVE to the best model — not an absolute threshold.
-    If top model scores 45%, the floor is 30%.
-    """
+    """Filter to models within the viability floor of the top scorer."""
     if not entries:
         return entries
     top_score = max(e["score_pct"] for e in entries)
-    floor = top_score - VIABILITY_GAP_PP
+    floor = compute_viability_floor(top_score)
     return [e for e in entries if e["score_pct"] >= floor]
 
 
@@ -126,7 +142,7 @@ def find_best_alternative(entries: list[dict]) -> dict | None:
     Find the model that's nearly as good but much cheaper than the top scorer.
 
     Constraints (from OpenMark's insights logic):
-    - Within 15pp of the top-scoring model
+    - Within the viability floor of the top-scoring model
     - At least 30% cheaper than the top model
     - Among candidates, pick the one with highest Acc/$
     """
@@ -142,12 +158,12 @@ def find_best_alternative(entries: list[dict]) -> dict | None:
         return None
 
     cost_ceiling = top_cost * (1 - ALTERNATIVE_MIN_SAVINGS_PCT / 100)
+    score_floor = compute_viability_floor(top_score)
 
     candidates = [
         e for e in entries
         if e["model"] != top["model"]
-        and (top_score - e["score_pct"]) <= VIABILITY_GAP_PP
-        and (top_score - e["score_pct"]) >= 0
+        and e["score_pct"] >= score_floor
         and e["cost"] < cost_ceiling
     ]
 
@@ -168,8 +184,14 @@ def compute_savings(top_entry: dict, alt_entry: dict) -> dict:
         result["projected_10k_top"] = round(top_entry["cost"] * 10000, 2)
         result["projected_10k_alt"] = round(alt_entry["cost"] * 10000, 2)
 
-    if alt_entry["time_s"] > 0 and top_entry["time_s"] / alt_entry["time_s"] >= 1.2:
-        result["speed_ratio"] = round(top_entry["time_s"] / alt_entry["time_s"], 1)
+    if alt_entry["time_s"] > 0 and top_entry["time_s"] > 0:
+        speed_ratio = top_entry["time_s"] / alt_entry["time_s"]
+        if speed_ratio >= 1.2:
+            result["speed_ratio"] = round(speed_ratio, 1)
+            result["alt_faster"] = True
+        elif speed_ratio <= 0.83:
+            result["speed_ratio"] = round(1.0 / speed_ratio, 1)
+            result["alt_faster"] = False
 
     return result
 
@@ -285,8 +307,18 @@ def check_freshness(export_date: str | None, warning_days: int) -> dict:
         return {"export_date": export_date, "days_old": None, "stale": False}
 
 
-def format_model_entry(entry: dict) -> dict:
-    openclaw_id = to_openclaw_id(entry["provider"], entry["model"])
+def format_model_entry(entry: dict, available_providers: set | None = None) -> dict:
+    oc_key = entry.get("oc_key")
+    oc_or_key = entry.get("oc_or_key")
+
+    if available_providers:
+        resolved = resolve_model_key(oc_key, oc_or_key, available_providers)
+        openclaw_id = resolved or oc_key or to_openclaw_id(entry["provider"], entry["model"])
+    elif oc_key:
+        openclaw_id = oc_key
+    else:
+        openclaw_id = to_openclaw_id(entry["provider"], entry["model"])
+
     return {
         "model": openclaw_id,
         "openmark_model": entry["model"],
@@ -294,7 +326,7 @@ def format_model_entry(entry: dict) -> dict:
         "score_pct": entry["score_pct"],
         "cost": entry["cost"],
         "acc_per_dollar": entry["acc_per_dollar"],
-        "stability": f"±{entry['stability']:.3f}",
+        "stability": f"\u00b1{entry['stability']:.3f}",
         "time_s": entry["time_s"],
         "pricing_tier": entry["pricing_tier"],
         "completion_pct": entry["completion_pct"],
@@ -303,7 +335,7 @@ def format_model_entry(entry: dict) -> dict:
 
 STRATEGY_REASONS = {
     "best_score": "Highest accuracy score in benchmark (6-step cascade sort)",
-    "best_cost_efficiency": "Best accuracy per dollar among viable models (within {gap}pp of top scorer)",
+    "best_cost_efficiency": "Best accuracy per dollar among viable models (within viability floor of top scorer)",
     "best_under_budget": "Highest score within cost ceiling",
     "best_under_latency": "Highest score within latency ceiling",
     "balanced": "Best weighted combination of accuracy, cost-efficiency, speed, and stability among viable models",
@@ -359,9 +391,10 @@ def route(task: str, config: dict, base_dir: str) -> dict:
             "available_categories": categories,
         }
 
+    available = set(config.get("available_providers", []))
     fallback_count = config.get("fallback_count", 2)
-    primary = format_model_entry(ranked[0])
-    fallbacks = [format_model_entry(e) for e in ranked[1 : 1 + fallback_count]]
+    primary = format_model_entry(ranked[0], available)
+    fallbacks = [format_model_entry(e, available) for e in ranked[1 : 1 + fallback_count]]
     freshness = check_freshness(
         target["export_date"], config.get("freshness_warning_days", 30)
     )
@@ -370,13 +403,13 @@ def route(task: str, config: dict, base_dir: str) -> dict:
     top_score = max(e["score_pct"] for e in entries)
 
     reason = STRATEGY_REASONS.get(strategy, "Ranked by selected strategy")
-    reason = reason.replace("{gap}", str(VIABILITY_GAP_PP))
     if is_tied:
-        reason += " (scores tied — differentiated by cost and speed)"
+        reason += " (scores tied -- differentiated by cost and speed)"
 
     result = {
         "status": "ok",
         "task": target["category"],
+        "display_name": target.get("display_name"),
         "strategy": strategy,
         "primary": primary,
         "fallbacks": fallbacks,
@@ -385,20 +418,25 @@ def route(task: str, config: dict, base_dir: str) -> dict:
         "total_models_evaluated": len(target["entries"]),
         "models_after_filtering": len(entries),
         "scores_tied": is_tied,
-        "viability_floor": round(top_score - VIABILITY_GAP_PP, 1),
+        "viability_floor": round(compute_viability_floor(top_score), 1),
         "reason": reason,
     }
 
     alt_entry = find_best_alternative(entries)
     if alt_entry:
         top_entry = cascade_sort(entries)[0]
-        result["best_alternative"] = format_model_entry(alt_entry)
+        result["best_alternative"] = format_model_entry(alt_entry, available)
         result["best_alternative"]["vs_top"] = compute_savings(top_entry, alt_entry)
+
+    dupes = detect_duplicates(all_benchmarks)
+    if dupes:
+        result["duplicates"] = dupes
 
     return result
 
 
 def list_categories(config: dict, base_dir: str) -> dict:
+    """List available categories with basic info."""
     benchmarks_dir = os.path.join(base_dir, config.get("benchmarks_dir", "benchmarks"))
     all_benchmarks = load_benchmarks_dir(benchmarks_dir)
     categories = []
@@ -411,6 +449,119 @@ def list_categories(config: dict, base_dir: str) -> dict:
     return {"categories": categories}
 
 
+def describe_categories(config: dict, base_dir: str) -> dict:
+    """List categories with full metadata (display_name, description) for classification."""
+    benchmarks_dir = os.path.join(base_dir, config.get("benchmarks_dir", "benchmarks"))
+    all_benchmarks = load_benchmarks_dir(benchmarks_dir)
+    categories = []
+    for b in all_benchmarks:
+        cat = {
+            "name": b["category"],
+            "display_name": b.get("display_name"),
+            "description": b.get("description"),
+            "models": len(b["entries"]),
+            "export_date": b["export_date"],
+        }
+        categories.append(cat)
+
+    result = {"categories": categories}
+
+    dupes = detect_duplicates(all_benchmarks)
+    if dupes:
+        result["duplicates"] = dupes
+
+    return result
+
+
+PROVIDER_CACHE_MAX_AGE_S = 3600
+
+
+def _provider_cache_path(base_dir: str | None = None) -> Path:
+    if base_dir:
+        return Path(base_dir) / ".providers_cache.json"
+    return Path(__file__).parent.parent / ".providers_cache.json"
+
+
+def _read_provider_cache(base_dir: str | None = None) -> dict | None:
+    cache_file = _provider_cache_path(base_dir)
+    if not cache_file.exists():
+        return None
+    try:
+        data = json.loads(cache_file.read_text())
+        cached_at = data.get("cached_at", "")
+        if cached_at:
+            age = (datetime.now() - datetime.fromisoformat(cached_at)).total_seconds()
+            if age < PROVIDER_CACHE_MAX_AGE_S:
+                return data
+    except Exception:
+        pass
+    return None
+
+
+def _write_provider_cache(result: dict, base_dir: str | None = None):
+    cache_file = _provider_cache_path(base_dir)
+    result["cached_at"] = datetime.now().isoformat()
+    try:
+        cache_file.write_text(json.dumps(result, indent=2))
+    except Exception:
+        pass
+
+
+def detect_providers(base_dir: str | None = None, force: bool = False) -> dict:
+    """
+    Run `openclaw models status --json` and extract providers with valid auth.
+    Fast (~6s) compared to `models list --all` (~2min). Results are cached
+    for 1 hour.
+    """
+    if not force:
+        cached = _read_provider_cache(base_dir)
+        if cached and cached.get("providers"):
+            return cached
+
+    try:
+        proc = subprocess.run(
+            ["openclaw", "models", "status", "--json"],
+            capture_output=True, text=True, timeout=30,
+            shell=(sys.platform == "win32"),
+        )
+        if proc.returncode != 0:
+            return {"providers": [], "error": proc.stderr.strip()}
+
+        stdout = proc.stdout.strip()
+        json_start = stdout.find("{")
+        if json_start == -1:
+            return {"providers": [], "error": "No JSON in openclaw output"}
+
+        data = json.loads(stdout[json_start:])
+
+        auth_providers = data.get("auth", {}).get("oauth", {}).get("providers", [])
+        active = []
+        missing = []
+        for p in auth_providers:
+            name = p.get("provider", "")
+            if p.get("status") in ("missing",):
+                missing.append(name)
+            elif name:
+                active.append(name)
+
+        known_prefixes = set(PROVIDER_MAP.values()) | {"openrouter", "together"}
+        matched = sorted(set(active) & known_prefixes)
+        unmapped = sorted(set(active) - known_prefixes)
+
+        result = {"providers": matched}
+        if unmapped:
+            result["unmapped"] = unmapped
+
+        _write_provider_cache(result, base_dir)
+        return result
+    except FileNotFoundError:
+        return {"providers": [], "error": "openclaw CLI not found in PATH"}
+    except subprocess.TimeoutExpired:
+        return {"providers": [], "error": "openclaw models status timed out"}
+    except Exception as e:
+        return {"providers": [], "error": str(e)}
+
+
 def resolve_base_dir(config_path: str | None) -> str:
     """Determine the skill's base directory."""
     if config_path:
@@ -421,7 +572,7 @@ def resolve_base_dir(config_path: str | None) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="OpenMark AI Router — benchmark-driven model routing"
+        description="OpenMark AI Router -- benchmark-driven model routing"
     )
     parser.add_argument("--task", "-t", help="Task category to route")
     parser.add_argument(
@@ -438,10 +589,41 @@ def main():
     )
     parser.add_argument("--config", "-c", help="Path to config.json")
     parser.add_argument(
+        "--providers",
+        help="Comma-separated list of available providers (overrides config)",
+    )
+    parser.add_argument(
         "--list-categories", action="store_true", help="List available task categories"
+    )
+    parser.add_argument(
+        "--describe", action="store_true",
+        help="List categories with full metadata for classification",
+    )
+    parser.add_argument(
+        "--validate",
+        help="Validate a CSV file for format correctness (path to CSV)",
+    )
+    parser.add_argument(
+        "--detect-providers", action="store_true",
+        help="Detect available providers from OpenClaw (cached for 1 hour)",
+    )
+    parser.add_argument(
+        "--force-detect", action="store_true",
+        help="Force provider re-detection (ignore cache)",
     )
 
     args = parser.parse_args()
+
+    if args.detect_providers:
+        base = resolve_base_dir(args.config)
+        result = detect_providers(base_dir=base, force=args.force_detect)
+        print(json.dumps(result, indent=2))
+        sys.exit(0)
+
+    if args.validate:
+        result = validate_csv(args.validate)
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result["valid"] else 1)
 
     base_dir = resolve_base_dir(args.config)
     config_path = args.config or os.path.join(base_dir, "config.json")
@@ -458,7 +640,18 @@ def main():
     if args.strategy:
         config["routing_strategy"] = args.strategy
 
-    if args.list_categories:
+    if args.providers:
+        config["available_providers"] = [
+            p.strip() for p in args.providers.split(",") if p.strip()
+        ]
+    elif not config.get("available_providers") and args.task:
+        detected = detect_providers(base_dir=resolve_base_dir(args.config))
+        if detected.get("providers"):
+            config["available_providers"] = detected["providers"]
+
+    if args.describe:
+        result = describe_categories(config, base_dir)
+    elif args.list_categories:
         result = list_categories(config, base_dir)
     elif args.task:
         result = route(args.task, config, base_dir)

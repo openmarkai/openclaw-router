@@ -1,6 +1,10 @@
 # Internal ops/planning docs (not for public repo)
 OPENCLAW_ROUTING_SKILL_PLAN.md
 SYSTEM_DESIGN.md
+TESTING_CHECKLIST.md
+config.md
+
+.providers_cache.json
 
 __pycache__/
 *.pyc
