@@ -1,9 +1,8 @@
 ---
 name: openmark-router-classify
-event: message:preprocessed
 description: Injects OpenMark benchmark categories into every substantive message so the agent can call route_task.
-priority: 100
-enabled: true
+metadata:
+  { "openclaw": { "emoji": "🔗", "events": ["message:preprocessed"], "requires": { "bins": ["python3"] } } }
 ---
 
 Runs `--classify` on every non-greeting message, caches results for 60 seconds,
