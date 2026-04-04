@@ -1,5 +1,4 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { Type } from "@sinclair/typebox";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -105,18 +104,22 @@ export default definePluginEntry({
         "Call this when a user message matches one of the benchmark " +
         "categories injected into the conversation. Pass the category " +
         "name and optionally a strategy override.",
-      parameters: Type.Object({
-        category: Type.String({
-          description:
-            "The benchmark category name to route to (e.g. 'academic_research_potential')",
-        }),
-        strategy: Type.Optional(
-          Type.String({
+      parameters: {
+        type: "object" as const,
+        properties: {
+          category: {
+            type: "string" as const,
+            description:
+              "The benchmark category name to route to (e.g. 'academic_research_potential')",
+          },
+          strategy: {
+            type: "string" as const,
             description:
               "Routing strategy override: balanced, best_score, best_cost_efficiency, best_under_budget, best_under_latency",
-          }),
-        ),
-      }),
+          },
+        },
+        required: ["category"],
+      },
 
       async execute(_id, params) {
         if (!baseDir) {
@@ -152,32 +155,33 @@ export default definePluginEntry({
       },
     });
 
-    api.registerHook({
-      event: "message:preprocessed",
-      async handler(event) {
-        if (event.type !== "message" || event.action !== "preprocessed") return;
-        const body = (event.context as { bodyForAgent?: string })?.bodyForAgent;
-        if (!body || typeof body !== "string") return;
-        if (isGreeting(body)) return;
-        if (!baseDir) return;
+    api.registerHook("message:preprocessed", async (event: {
+      type?: string;
+      action?: string;
+      context?: { bodyForAgent?: string };
+    }) => {
+      if (event.type !== "message" || event.action !== "preprocessed") return;
+      const body = event.context?.bodyForAgent;
+      if (!body || typeof body !== "string") return;
+      if (isGreeting(body)) return;
+      if (!baseDir) return;
 
-        const categories = getCategories(baseDir);
-        if (!categories || categories.length === 0) return;
+      const categories = getCategories(baseDir);
+      if (!categories || categories.length === 0) return;
 
-        const lines = [
-          "[OPENMARK ROUTER: Benchmark categories available. If the user's message matches a category, call the route_task tool with the category name. If none match, respond normally.]",
-          "",
-        ];
-        for (const cat of categories) {
-          lines.push(
-            `- ${cat.name}: ${cat.display_name} — ${cat.description}`,
-          );
-        }
-        lines.push("");
+      const lines = [
+        "[OPENMARK ROUTER: Benchmark categories available. If the user's message matches a category, call the route_task tool with the category name. If none match, respond normally.]",
+        "",
+      ];
+      for (const cat of categories) {
+        lines.push(
+          `- ${cat.name}: ${cat.display_name} — ${cat.description}`,
+        );
+      }
+      lines.push("");
 
-        (event.context as { bodyForAgent: string }).bodyForAgent =
-          lines.join("\n") + body;
-      },
-    });
+      (event.context as { bodyForAgent: string }).bodyForAgent =
+        lines.join("\n") + body;
+    }, { name: "openmark-router-classify" });
   },
 });
