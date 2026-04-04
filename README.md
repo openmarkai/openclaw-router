@@ -44,12 +44,17 @@ Your OpenMark AI benchmarks
   Send CSV to your agent in chat
         |
         v
-  Agent auto-detects providers, classifies your task,
-  runs the router, switches to the best model
+  --classify: agent reads category descriptions, matches your task
+        |
+        v
+  --route: script detects providers, runs routing math,
+  switches model, sets fallbacks, returns card (all deterministic)
         |
         v
   Task executes on the optimal model
-  Agent restores default model when done
+        |
+        v
+  --restore: script resets to default model when done
 ```
 
 1. **Benchmark** your recurring tasks on [OpenMark AI](https://openmark.ai) (100+ models available)
@@ -59,12 +64,15 @@ Your OpenMark AI benchmarks
 
 ### What happens under the hood
 
-- **Provider auto-discovery**: The agent runs `router.py --detect-providers` which probes OpenClaw's model catalog and returns only the provider names you have configured. Only recommends models you can actually use. No API keys are accessed.
+The architecture follows a strict principle: **LLM decides WHAT, code decides HOW.** The LLM's only job is to classify user intent against benchmark descriptions. All other control flow is deterministic Python.
+
+- **Two-command flow**: The agent runs `--classify` (get category list) then `--route <category>` (execute everything). No multi-step orchestration, no parsing, no manual command execution.
+- **Provider auto-discovery**: The `--route` command internally detects configured providers (cached for 1 hour). Only recommends models you can actually use. No API keys are accessed.
 - **Intelligent classification**: The agent reads benchmark task descriptions and classifies your request by understanding intent -- not by matching keywords. No heuristic triggers.
-- **Classification only when needed**: Greetings, follow-ups, and non-task messages don't trigger classification. The agent uses judgment, not rules.
-- **Deterministic model selection**: Once a task is classified, the Python routing engine ranks models using fixed rules and math. Zero LLM involvement in the ranking. Same data, same result, every time.
-- **Actual model switching**: The agent executes `openclaw models set` to switch to the recommended model, then sets benchmark-ranked fallback models. It routes, it doesn't just recommend.
-- **Auto-restore**: After an auto-routed task completes, the agent switches back to the default model. Manually routed tasks persist until you choose differently.
+- **Classification only when needed**: Greetings, follow-ups, and non-task messages skip classification. The agent uses judgment, not rules.
+- **Deterministic model selection**: Once a task is classified, `--route` ranks models using fixed rules and math. Zero LLM involvement in the ranking. Same data, same result, every time.
+- **Actual model switching**: The `--route` command executes `openclaw models set` and sets benchmark-ranked fallback models internally via subprocess. The LLM never runs these commands directly.
+- **Auto-restore**: After an auto-routed task completes, the agent runs `--restore` which resets the model deterministically. Manually routed tasks persist until you choose differently.
 
 ## Quick Start
 
@@ -107,7 +115,17 @@ You can also change settings via chat -- just tell the agent (e.g. "set routing 
 
 > **Tip:** Use a fast, low-cost model as your OpenClaw default (e.g. Gemini flash-lite, Claude Haiku, GPT-5.4-mini, Mistral Small). The router switches to the optimal model for each task, so your default only needs to handle classification and general conversation.
 
-### 4. Start using it
+### 4. Enable streaming (recommended)
+
+For Telegram, Discord, or any channel that supports it, enable streaming so responses appear progressively instead of as a single block:
+
+```bash
+openclaw config set channels.telegram.streaming true
+```
+
+The initial routing step takes ~10-20 seconds (provider detection + model switch), after which the response streams in. First route in a session may be slower while the provider cache warms up; subsequent routes are faster.
+
+### 5. Start using it
 
 ```bash
 /new
@@ -116,16 +134,17 @@ You can also change settings via chat -- just tell the agent (e.g. "set routing 
 The agent picks up the skill and routes automatically. Or test the router directly:
 
 ```bash
-python3 scripts/router.py --describe                          # list categories
-python3 scripts/router.py --task "chatbot_potential_benchmark" # get a recommendation
-python3 scripts/router.py --validate path/to/file.csv         # validate a CSV
+python3 scripts/router.py --classify                          # list categories for classification
+python3 scripts/router.py --route "chatbot_potential_benchmark"  # full route + model switch
+python3 scripts/router.py --restore                            # reset to previous model
+python3 scripts/router.py --validate path/to/file.csv          # validate a CSV
 ```
 
 ## Two Routing Modes
 
 ### Automatic routing (agent classifies the task)
 
-The agent reads benchmark category descriptions and matches your request to the best category using its own reasoning. It then switches to the optimal model, executes your task, and restores the default model when done. No action needed from you.
+The agent runs `--classify` to get benchmark categories, matches your request to the best one using its own reasoning, then runs `--route` which handles everything deterministically — provider detection, model switching, fallback setup, and routing card generation. After the task, `--restore` resets to the default model. No action needed from you.
 
 ### Manual routing (you select the task)
 
@@ -154,6 +173,8 @@ Tip: reply "cost" or "speed" to re-route with a different strategy
 ```
 
 The best alternative shows a model that's nearly as good as the top scorer but significantly cheaper -- with projected savings over 10,000 calls. Speed ratios are shown when the difference exceeds 1.2x. After the first routing, you can reply "cost" or "speed" to quickly re-route with a different strategy.
+
+The routing card is generated entirely by the Python script -- the LLM just displays it verbatim. Zero creative generation cost for the card itself.
 
 ## Routing Engine
 
@@ -215,6 +236,7 @@ The router sets fallback models ranked by the same benchmark data. If the primar
 - **Agent is the classifier**: No separate classifier model, no hidden API calls. Classification uses the agent's own model with your benchmark descriptions.
 - **No keyword heuristics**: Classification is based on full task descriptions auto-exported from OpenMark AI. The LLM understands context, not pattern-matched keywords.
 - **Prompt caching compatible**: The SKILL.md instructions in the system prompt benefit from provider prompt caching (Anthropic, OpenAI, Google), reducing input token costs on repeated calls.
+- **Minimal token overhead**: Classification adds ~200-400 tokens per routed message (the benchmark category descriptions). Non-matching messages add zero overhead beyond the classify call. The routing card is script-generated, not LLM-generated.
 
 ## Supported Modalities
 

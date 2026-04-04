@@ -5,6 +5,7 @@ TESTING_CHECKLIST.md
 config.md
 
 .providers_cache.json
+.routing_state.json
 
 __pycache__/
 *.pyc

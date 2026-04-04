@@ -5,16 +5,20 @@ OpenMark AI Router — Core routing engine.
 Reads benchmark CSVs, filters by user config, ranks models by strategy,
 and outputs a JSON recommendation to stdout.
 
-Ranking logic mirrors OpenMark AI's internal model selection:
-- 6-step cascade sort (score -> Acc/$ -> Acc/min -> cost -> name)
-- Viability floor (proportional at low scores, 15pp at high scores)
-- Tie detection (when >=80% of models score within 1pp, differentiate on cost)
-- Best alternative identification (nearly as good, much cheaper)
+Architecture: LLM decides WHAT (task classification). Code decides HOW
+(provider detection, routing math, model switching, fallback setup, card
+formatting, auto-restore). The agent never needs to run openclaw CLI
+commands directly — the script handles all side effects.
 
-Usage:
-    python3 router.py --task <category> [--strategy <strategy>] [--providers <list>] [--config <path>]
-    python3 router.py --list-categories [--config <path>]
-    python3 router.py --describe [--config <path>]
+Primary modes (deterministic flow):
+    --classify              Return benchmark categories for LLM classification
+    --route <category>      Route, switch model, set fallbacks, return card
+    --restore               Restore previous model after routed task completes
+
+Legacy modes (backward compat):
+    --task <category>       Route without executing model switch
+    --list-categories       List category names
+    --describe              List categories with metadata
 """
 
 import argparse
@@ -423,10 +427,9 @@ def route(task: str, config: dict, base_dir: str) -> dict:
     }
 
     alt_entry = find_best_alternative(entries)
-    if alt_entry:
-        top_entry = cascade_sort(entries)[0]
+    if alt_entry and alt_entry["model"] != ranked[0]["model"]:
         result["best_alternative"] = format_model_entry(alt_entry, available)
-        result["best_alternative"]["vs_top"] = compute_savings(top_entry, alt_entry)
+        result["best_alternative"]["vs_top"] = compute_savings(ranked[0], alt_entry)
 
     dupes = detect_duplicates(all_benchmarks)
     if dupes:
@@ -472,6 +475,219 @@ def describe_categories(config: dict, base_dir: str) -> dict:
 
     return result
 
+
+# ---------------------------------------------------------------------------
+# Deterministic flow: --classify, --route, --restore
+# ---------------------------------------------------------------------------
+
+def classify(config: dict, base_dir: str) -> dict:
+    """Return benchmark categories for LLM classification, or skip signal.
+
+    If a previous routing state exists, restores the default model first
+    (deterministic auto-restore). This ensures every classify call starts
+    from a clean state without requiring the LLM to call --restore.
+    """
+    restored = None
+    sp = _state_path(base_dir)
+    if sp.exists():
+        restore_result = execute_restore(base_dir)
+        if restore_result.get("status") == "ok":
+            restored = restore_result.get("model_set")
+
+    benchmarks_dir = os.path.join(base_dir, config.get("benchmarks_dir", "benchmarks"))
+    all_benchmarks = load_benchmarks_dir(benchmarks_dir)
+
+    if not all_benchmarks:
+        result = {"action": "skip", "reason": "no benchmarks loaded"}
+        if restored:
+            result["restored_model"] = restored
+        return result
+
+    categories = []
+    for b in all_benchmarks:
+        categories.append({
+            "name": b["category"],
+            "display_name": b.get("display_name"),
+            "description": b.get("description"),
+        })
+
+    result = {"action": "classify", "categories": categories}
+    if restored:
+        result["restored_model"] = restored
+    return result
+
+
+def format_routing_card(primary: dict, display_name: str | None,
+                        strategy: str, freshness: dict,
+                        best_alt: dict | None) -> str:
+    """Generate pre-formatted routing card text."""
+    model_name = primary.get("openmark_model", primary["model"])
+    provider = primary["provider"]
+    dn = display_name or "Benchmark"
+
+    lines = [
+        f"Routed to {model_name} ({provider}) \u2014 {dn}",
+        f"Score: {primary['score_pct']}%  |  ${primary['cost']}/call  |  {primary['time_s']}s",
+    ]
+
+    alt_is_same = (best_alt and best_alt.get("model") == primary.get("model"))
+    if best_alt and best_alt.get("vs_top") and not alt_is_same:
+        vs = best_alt["vs_top"]
+        alt_model = best_alt.get("openmark_model", best_alt["model"])
+        alt_line = f"\nAlternative: {alt_model} \u2014 {best_alt['score_pct']}% score"
+        if vs.get("savings_pct"):
+            alt_line += f", {vs['savings_pct']}% cheaper"
+        if vs.get("speed_ratio") and vs.get("alt_faster"):
+            alt_line += f", {vs['speed_ratio']}x faster"
+        elif vs.get("speed_ratio") and not vs.get("alt_faster"):
+            alt_line += f", {vs['speed_ratio']}x slower"
+        lines.append(alt_line)
+
+        proj_top = vs.get("projected_10k_top", 0)
+        proj_alt = vs.get("projected_10k_alt", 0)
+        if abs(proj_top - proj_alt) > 1:
+            lines.append(f"  Over 10K calls: ${proj_alt} vs ${proj_top}")
+
+    fresh_label = "fresh"
+    if freshness.get("stale"):
+        fresh_label = f"{freshness['days_old']}d old (stale)"
+    elif freshness.get("days_old") is not None:
+        fresh_label = f"{freshness['days_old']}d old" if freshness["days_old"] > 0 else "fresh"
+
+    lines.append(f"\nStrategy: {strategy}  |  Data: {fresh_label}")
+
+    return "\n".join(lines)
+
+
+def _run_openclaw_cmd(args: list[str]) -> tuple[int, str, str]:
+    """Run an openclaw CLI command and return (returncode, stdout, stderr)."""
+    try:
+        proc = subprocess.run(
+            ["openclaw"] + args,
+            capture_output=True, text=True, timeout=30,
+            shell=(sys.platform == "win32"),
+        )
+        return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+    except FileNotFoundError:
+        return 1, "", "openclaw CLI not found in PATH"
+    except subprocess.TimeoutExpired:
+        return 1, "", "openclaw command timed out"
+
+
+def _state_path(base_dir: str) -> Path:
+    return Path(base_dir) / ".routing_state.json"
+
+
+def execute_route(category: str, config: dict, base_dir: str,
+                  strategy_override: str | None = None) -> dict:
+    """
+    Full deterministic routing: compute route, switch model, set fallbacks,
+    save state, return pre-formatted card. The LLM just displays the output.
+    """
+    if strategy_override:
+        config["routing_strategy"] = strategy_override
+
+    if not config.get("available_providers"):
+        detected = detect_providers(base_dir=base_dir)
+        if detected.get("providers"):
+            config["available_providers"] = detected["providers"]
+
+    result = route(category, config, base_dir)
+
+    if result["status"] != "ok":
+        return result
+
+    primary_model = result["primary"]["model"]
+    fallback_models = [f["model"] for f in result.get("fallbacks", [])]
+    strategy = result.get("strategy", "balanced")
+
+    # -- Save state for --restore -------------------------------------------
+    state = {
+        "routed_category": category,
+        "routed_model": primary_model,
+        "previous_model": config.get("default_model", ""),
+        "fallbacks": fallback_models,
+        "routed_at": datetime.now().isoformat(),
+    }
+    try:
+        _state_path(base_dir).write_text(json.dumps(state, indent=2))
+    except Exception:
+        pass
+
+    # -- Execute model switch -----------------------------------------------
+    errors = []
+
+    rc, _, err = _run_openclaw_cmd(["models", "set", primary_model])
+    if rc != 0:
+        errors.append(f"models set failed: {err}")
+
+    _run_openclaw_cmd(["models", "fallbacks", "clear"])
+    for fb in fallback_models:
+        rc, _, err = _run_openclaw_cmd(["models", "fallbacks", "add", fb])
+        if rc != 0:
+            errors.append(f"fallbacks add {fb} failed: {err}")
+
+    # -- Build card ---------------------------------------------------------
+    card = format_routing_card(
+        primary=result["primary"],
+        display_name=result.get("display_name"),
+        strategy=strategy,
+        freshness=result.get("freshness", {}),
+        best_alt=result.get("best_alternative"),
+    )
+
+    output = {
+        "status": "ok",
+        "card": card,
+        "model_set": primary_model,
+        "fallbacks_set": fallback_models,
+        "previous_model": config.get("default_model", ""),
+        "category": category,
+        "strategy": strategy,
+    }
+
+    if errors:
+        output["warnings"] = errors
+
+    return output
+
+
+def execute_restore(base_dir: str) -> dict:
+    """Restore the previous model after a routed task completes."""
+    sp = _state_path(base_dir)
+    if not sp.exists():
+        return {"status": "no_state", "message": "No routing state to restore."}
+
+    try:
+        state = json.loads(sp.read_text())
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to read state: {e}"}
+
+    previous = state.get("previous_model")
+    if not previous:
+        return {"status": "error", "message": "No previous model in state."}
+
+    rc, _, err = _run_openclaw_cmd(["models", "set", previous])
+    if rc != 0:
+        return {"status": "error", "message": f"Model restore failed: {err}"}
+
+    _run_openclaw_cmd(["models", "fallbacks", "clear"])
+
+    try:
+        sp.unlink()
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "message": f"Restored to {previous}.",
+        "model_set": previous,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Provider detection (cached)
+# ---------------------------------------------------------------------------
 
 PROVIDER_CACHE_MAX_AGE_S = 3600
 
@@ -574,24 +790,23 @@ def main():
     parser = argparse.ArgumentParser(
         description="OpenMark AI Router -- benchmark-driven model routing"
     )
-    parser.add_argument("--task", "-t", help="Task category to route")
+
+    # Primary deterministic modes
     parser.add_argument(
-        "--strategy",
-        "-s",
-        choices=[
-            "best_score",
-            "best_cost_efficiency",
-            "best_under_budget",
-            "best_under_latency",
-            "balanced",
-        ],
-        help="Override routing strategy from config",
+        "--classify", action="store_true",
+        help="Return benchmark categories for LLM classification",
     )
-    parser.add_argument("--config", "-c", help="Path to config.json")
     parser.add_argument(
-        "--providers",
-        help="Comma-separated list of available providers (overrides config)",
+        "--route",
+        help="Route to a category: detect providers, switch model, set fallbacks, return card",
     )
+    parser.add_argument(
+        "--restore", action="store_true",
+        help="Restore previous model after routed task completes",
+    )
+
+    # Legacy / utility modes
+    parser.add_argument("--task", "-t", help="(Legacy) Route without executing model switch")
     parser.add_argument(
         "--list-categories", action="store_true", help="List available task categories"
     )
@@ -612,7 +827,27 @@ def main():
         help="Force provider re-detection (ignore cache)",
     )
 
+    # Shared options
+    parser.add_argument(
+        "--strategy", "-s",
+        choices=[
+            "best_score",
+            "best_cost_efficiency",
+            "best_under_budget",
+            "best_under_latency",
+            "balanced",
+        ],
+        help="Override routing strategy from config",
+    )
+    parser.add_argument("--config", "-c", help="Path to config.json")
+    parser.add_argument(
+        "--providers",
+        help="Comma-separated list of available providers (overrides config)",
+    )
+
     args = parser.parse_args()
+
+    # -- Modes that don't need config ---------------------------------------
 
     if args.detect_providers:
         base = resolve_base_dir(args.config)
@@ -624,6 +859,8 @@ def main():
         result = validate_csv(args.validate)
         print(json.dumps(result, indent=2))
         sys.exit(0 if result["valid"] else 1)
+
+    # -- Load config --------------------------------------------------------
 
     base_dir = resolve_base_dir(args.config)
     config_path = args.config or os.path.join(base_dir, "config.json")
@@ -637,14 +874,37 @@ def main():
         )
         sys.exit(1)
 
-    if args.strategy:
-        config["routing_strategy"] = args.strategy
-
     if args.providers:
         config["available_providers"] = [
             p.strip() for p in args.providers.split(",") if p.strip()
         ]
-    elif not config.get("available_providers") and args.task:
+
+    # -- Primary deterministic modes ----------------------------------------
+
+    if args.classify:
+        result = classify(config, base_dir)
+        print(json.dumps(result, indent=2))
+        sys.exit(0)
+
+    if args.route:
+        result = execute_route(
+            args.route, config, base_dir,
+            strategy_override=args.strategy,
+        )
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("status") == "ok" else 1)
+
+    if args.restore:
+        result = execute_restore(base_dir)
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("status") == "ok" else 1)
+
+    # -- Legacy modes -------------------------------------------------------
+
+    if args.strategy:
+        config["routing_strategy"] = args.strategy
+
+    if not config.get("available_providers") and args.task:
         detected = detect_providers(base_dir=resolve_base_dir(args.config))
         if detected.get("providers"):
             config["available_providers"] = detected["providers"]

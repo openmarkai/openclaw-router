@@ -1,8 +1,8 @@
 {
   "name": "openmark-router",
   "displayName": "OpenMark AI Router",
-  "description": "Benchmark-driven model routing powered by OpenMark AI. Routes tasks to optimal models using real evaluation data — accuracy, cost, latency, stability — not keyword heuristics or complexity tiers. Supports direct API providers and OpenRouter. Features auto and manual routing modes, provider auto-discovery, intelligent classification (only when needed — no overhead on greetings or follow-ups), 5 routing strategies, benchmark-ranked fallback models for rate limit resilience, and a deterministic ranking engine. Security-first: never accesses API keys or system files. Clean install with zero external dependencies.",
-  "version": "1.2.0",
+  "description": "Benchmark-driven model routing powered by OpenMark AI. Routes tasks to optimal models using real evaluation data — accuracy, cost, latency, stability — not keyword heuristics or complexity tiers. Fully deterministic execution: LLM only classifies tasks, scripts handle all control flow (model switching, fallback setup, provider detection, routing card generation, auto-restore). Supports direct API providers and OpenRouter. Features auto and manual routing modes, provider auto-discovery, intelligent classification (only when needed — no overhead on greetings or follow-ups), 5 routing strategies, benchmark-ranked fallback models for rate limit resilience. Security-first: never accesses API keys or system files. Clean install with zero external dependencies.",
+  "version": "2.0.0",
   "author": "openmarkai",
   "homepage": "https://openmark.ai",
   "repository": "https://github.com/openmarkai/openclaw-router",

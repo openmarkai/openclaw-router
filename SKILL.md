@@ -1,7 +1,7 @@
 ---
 name: openmark_router
 description: Benchmark-driven model routing powered by OpenMark AI. Routes tasks to optimal models based on real evaluation data — accuracy, cost, latency, stability — not keyword heuristics or complexity tiers.
-version: 1.2.0
+version: 2.0.0
 user-invocable: true
 metadata: {"openclaw": {"requires": {"bins": ["python3"]}, "os": ["darwin", "linux", "win32"]}}
 ---
@@ -14,14 +14,10 @@ Routes your agent to the best model for each task type, using benchmark
 results from OpenMark AI (https://openmark.ai) instead of guessing by
 complexity tier.
 
-Every existing routing approach classifies tasks into tiers like "simple" or
-"complex" and maps them to hardcoded models. This fails because model
-performance is task-specific, not complexity-specific. A model that wins on
-email classification may lose on legal document extraction, even if both are
-"medium" complexity.
-
-This skill uses real benchmark data from your actual tasks to make routing
-decisions based on accuracy, cost-efficiency, latency, and stability.
+The router uses deterministic scripts for all control flow. The LLM's
+only job is to match user intent to a benchmark category. Everything
+else — provider detection, routing math, model switching, fallback setup,
+card formatting, auto-restore — is handled by code.
 
 ## Setup
 
@@ -35,13 +31,6 @@ decisions based on accuracy, cost-efficiency, latency, and stability.
 flash-lite, Claude Haiku, GPT-5.4-mini, Mistral Small). The router switches
 to the optimal model for each task, so your default only needs to handle
 classification and general conversation.
-
-The router auto-detects which providers are available in your OpenClaw
-config. No need to manually list them unless you want to restrict further.
-
-For Telegram inline buttons (task picker), ensure
-`channels.telegram.capabilities.inlineButtons` is enabled in your OpenClaw
-config (default: `allowlist`).
 
 ## Adding Benchmarks via Chat
 
@@ -96,213 +85,123 @@ After the user chooses, delete the unwanted file(s) from `{baseDir}/benchmarks/`
 
 When a user asks to remove or delete a benchmark category:
 
-1. Run `--describe` to show available categories with their names.
+1. Run `--classify` to see available categories.
 2. Confirm with the user which category to remove.
-3. Delete the file:
-
-```bash
-rm {baseDir}/benchmarks/<task_name>.csv
-```
-
+3. Delete the file from `{baseDir}/benchmarks/<task_name>.csv`.
 4. Confirm: "Removed benchmark: <display_name>. You now have <remaining>
    benchmark categories."
 
 ## First-Run Setup
 
-On the first message in a new session, check if benchmarks are loaded:
+On the first message in a new session, run:
 
 ```bash
-python3 {baseDir}/scripts/router.py --list-categories --config {baseDir}/config.json
+python3 {baseDir}/scripts/router.py --classify --config {baseDir}/config.json
 ```
 
-If the output shows zero categories, this user hasn't added any benchmark
+If the output shows `"action": "skip"`, this user hasn't added any benchmark
 data yet. Proactively help them get started:
 
-1. Check their current default model:
+"To get started with benchmark-driven routing:
+1. Benchmark your tasks on OpenMark AI (https://openmark.ai)
+2. Export using Export → OpenClaw on the Results tab
+3. Send the CSV file here in chat — I'll handle the rest"
 
-```bash
-openclaw models list --json
-```
-
-   The default model has the `"default"` tag. This command (without `--all`)
-   returns only configured models, which is a small list — fine here.
-
-2. If the default model is a high-cost model (e.g. gemini-3.1-pro,
-   claude-opus-4.6, gpt-5.4-pro), suggest switching to a lighter default:
-   "Your current default model is <model>. Since this routing skill
-   switches to the optimal model per task, a lighter default like
-   gemini-3.1-flash-lite or claude-haiku-4.5 keeps costs low for
-   classification and general chat. Want me to switch it?"
-
-3. Guide them to add benchmarks:
-   "To get started with benchmark-driven routing:
-   1. Benchmark your tasks on OpenMark AI (https://openmark.ai)
-   2. Export using Export → OpenClaw on the Results tab
-   3. Send the CSV file here in chat — I'll handle the rest"
-
-Only show this guidance once. After the user has at least one benchmark
-loaded, skip this section entirely.
+Only show this guidance once per session.
 
 ## How to Route
 
-There are two routing flows: automatic (you classify the task) and manual
-(the user selects a task directly). Both follow the same provider-probing
-and model-switching steps.
+There are two flows: automatic (you classify the task) and manual (user
+invokes the skill directly). Both use two deterministic commands.
 
-### Step 1: Discover available providers
+### Auto-routing flow
 
-Provider detection is automatic. When you run the router in Step 3 without
-`--providers`, it auto-detects configured providers (cached for 1 hour).
-You can skip this step entirely — the router handles it.
+On every user message that looks like a substantive task (not greetings,
+follow-ups, or casual chat):
 
-If you need to check providers explicitly or the cache seems stale:
+**Step 1 — Classify:**
 
 ```bash
-python3 {baseDir}/scripts/router.py --detect-providers --config {baseDir}/config.json
+python3 {baseDir}/scripts/router.py --classify --config {baseDir}/config.json
 ```
 
-To force a fresh detection (ignores cache):
+If the result is `"action": "skip"`, there are no benchmarks. Use the
+default model and proceed normally.
+
+If `"action": "classify"`, read the `categories` array. Each has a `name`,
+`display_name`, and `description`. Match the user's message to the best
+category by understanding what each benchmark covers. Do NOT use keyword
+matching — understand the intent.
+
+If no category is a reasonable match, proceed with the default model.
+Optionally mention: "No benchmark data for this task type. Using default
+model."
+
+**Step 2 — Route:**
+
+If a category matches:
 
 ```bash
-python3 {baseDir}/scripts/router.py --detect-providers --force-detect --config {baseDir}/config.json
+python3 {baseDir}/scripts/router.py --route <category_name> --config {baseDir}/config.json
 ```
 
-This returns a compact JSON like `{"providers": ["anthropic", "google", "openai"]}`.
-You can optionally pass `--providers` in Step 3 to override auto-detection.
+This command handles everything internally:
+- Detects available providers (cached)
+- Runs the routing algorithm
+- Executes `openclaw models set` and `openclaw models fallbacks` commands
+- Saves routing state for auto-restore
+- Returns a pre-formatted routing card
 
-### Step 2a: Auto-routing (agent classifies the task)
+Display the `card` field from the output verbatim, then proceed with the
+user's task on the new model.
 
-When a user sends a task and you need to determine which benchmark category
-it matches:
-
-1. Load category descriptions:
+To use a specific strategy, add `--strategy <name>`:
 
 ```bash
-python3 {baseDir}/scripts/router.py --describe --config {baseDir}/config.json
+python3 {baseDir}/scripts/router.py --route <category> --strategy best_cost_efficiency --config {baseDir}/config.json
 ```
 
-2. Read the `display_name` and `description` of each category in the output.
-   Match the user's request to the best category by understanding what each
-   benchmark covers. Do NOT use keyword matching — understand the intent.
+**Auto-restore:**
 
-3. If no category is a reasonable match, skip routing. Use the default model
-   from config.json and tell the user: "No benchmark data for this task type.
-   Using default model. Consider benchmarking this task on OpenMark AI
-   (https://openmark.ai) to get data-driven routing."
+You do NOT need to call `--restore` manually. The `--classify` command
+automatically restores the previous model if a routing state exists from a
+prior `--route` call. This means every classify call starts from a clean
+state. The `--restore` command still exists for manual use if needed.
 
-4. If a category matches, proceed to Step 3.
-
-### Step 2b: Manual routing (user invokes the skill)
+### Manual routing flow
 
 When the user invokes `/openmark_router`:
 
-**Without a task name** — present available categories as a menu:
+**Without a task name** — run `--classify` and present the categories as
+a menu:
 - If 10 or fewer categories:
-  - On Telegram: use inline buttons via the message tool. Each button's text
-    should be the `display_name` and `callback_data` should be the category
-    `name`. Example buttons format:
-    `[{"text": "Chat Bot Potential", "callback_data": "route:chatbot_potential_benchmark"}]`
+  - On Telegram: use inline buttons. Each button's text = `display_name`,
+    `callback_data` = `route:<category_name>`.
   - On other channels: present a numbered list with display names.
-- If more than 10 categories: present a numbered list on all channels
-  (too many buttons degrades UX). The user replies with a number or name.
+- If more than 10 categories: present a numbered list on all channels.
+  The user replies with a number or name.
 
-**With a task name** (e.g. `/openmark_router chatbot_potential_benchmark`):
-skip the menu and proceed directly to Step 3 with the provided category.
+**With a task name** (e.g. `/openmark_router chatbot_potential`):
+run `--route <task_name>` directly.
 
-### Step 3: Run the router
-
-```bash
-python3 {baseDir}/scripts/router.py --task "<category>" --providers <provider_list> --config {baseDir}/config.json
-```
-
-Replace `<category>` with the matched category name and `<provider_list>`
-with the comma-separated providers from Step 1.
-
-### Step 4: Execute the model switch
-
-If the router returns `status: "ok"`:
-
-1. Switch to the recommended model:
-
-```bash
-openclaw models set <primary.model>
-```
-
-2. Set fallbacks from the router output:
-
-```bash
-openclaw models fallbacks clear
-openclaw models fallbacks add <fallback_1.model>
-openclaw models fallbacks add <fallback_2.model>
-```
-
-3. Present the routing card to the user (see Routing Card Format below).
-4. Proceed with the task on the new model.
-
-If the router returns `status: "no_match"` or `status: "no_models"`, use
-the `default_model` from the output and inform the user.
-
-### Step 5: Auto-restore after task completion
-
-The restore behavior depends on how routing was triggered:
-
-**Auto-routed** (you classified the task in Step 2a): After the task is
-complete, switch back to the default model:
-
-```bash
-openclaw models set <default_model_from_config>
-```
-
-This keeps routing scoped to the task. The next message gets re-classified.
-
-**Manually routed** (user invoked `/openmark_router` in Step 2b): Stay on
-the routed model. Do NOT switch back automatically. The user chose this
-task mode intentionally. Only switch when:
+For manual routing, do NOT run `--restore` afterward. The user chose this
+mode intentionally. Only switch when:
 - The user starts a new session (`/new`)
 - The user explicitly routes to a different task
-- You auto-classify a clearly different task type in a subsequent message
-
-## Routing Card Format
-
-Present routing results in this compact format:
-
-```
-Routed to <model_name> (<provider>) — <display_name>
-Score: <score_pct>%  |  $<cost>/call  |  <time_s>s
-
-Alternative: <alt_model> — <alt_score>% score, <savings_pct>% cheaper
-  Over 10K calls: $<projected_10k_alt> vs $<projected_10k_top>
-
-Strategy: <strategy>  |  Data: <freshness>
-```
-
-Rules:
-- Show the "Alternative" section only if `best_alternative` exists in the
-  router output.
-- Show the "Over 10K calls" line only when the dollar difference exceeds $1.
-- If `best_alternative.vs_top.alt_faster` is true, append the speed ratio:
-  ", <speed_ratio>x faster"
-- If `best_alternative.vs_top.alt_faster` is false, append:
-  ", <speed_ratio>x slower"
-- For freshness: show "fresh" if not stale, or "<days_old>d old" if stale.
-- If `freshness.stale` is true, add a warning: "Benchmark data may be
-  outdated. Consider re-benchmarking on OpenMark AI."
+- You auto-classify a clearly different task type later
 
 ## Strategy Quickswitch
 
-On the FIRST routing result in a session, append this line after the card:
+On the FIRST routing result in a session, append after the card:
 
 ```
 Tip: reply "cost" or "speed" to re-route with a different strategy
 ```
 
-- "cost" → re-route with `best_cost_efficiency` strategy
-- "speed" → re-route with `best_under_latency` strategy
+- "cost" → re-run `--route <same_category> --strategy best_cost_efficiency`
+- "speed" → re-run `--route <same_category> --strategy best_under_latency`
 
-Do NOT show this hint after the first time. The user has seen it.
-
-When the user replies with "cost" or "speed", re-run Step 3 with the
-corresponding `--strategy` flag and repeat Step 4.
+Do NOT show the tip after the first time.
 
 ## Routing Strategies
 
@@ -347,8 +246,7 @@ cat {baseDir}/config.json
 
 4. Confirm: "Updated <field> to <value>."
 
-Do NOT allow changes to fields not listed above. If the user asks to change
-something else, explain what settings are available.
+Do NOT allow changes to fields not listed above.
 
 ## Config Reference
 
