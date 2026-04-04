@@ -14,6 +14,7 @@ let cacheTimestamp = 0;
 
 function getBaseDir(): string | null {
   const candidates = [
+    __dirname,
     resolve(
       process.env.OPENCLAW_WORKSPACE_DIR ||
         join(
@@ -24,7 +25,6 @@ function getBaseDir(): string | null {
       "skills",
       "openmark-router",
     ),
-    resolve(__dirname, ".."),
   ];
   for (const dir of candidates) {
     if (existsSync(join(dir, "scripts", "router.py"))) return dir;
@@ -98,7 +98,6 @@ export default definePluginEntry({
   register(api) {
     const baseDir = getBaseDir();
 
-    // -- Tool: route_task ------------------------------------------------
     api.registerTool({
       name: "route_task",
       description:
@@ -153,7 +152,6 @@ export default definePluginEntry({
       },
     });
 
-    // -- Hook: inject categories on every message ------------------------
     api.registerHook({
       event: "message:preprocessed",
       async handler(event) {

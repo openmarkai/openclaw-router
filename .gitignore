@@ -7,6 +7,8 @@ config.md
 .providers_cache.json
 .routing_state.json
 
+node_modules/
+
 __pycache__/
 *.pyc
 *.pyo

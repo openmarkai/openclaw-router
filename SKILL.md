@@ -1,6 +1,6 @@
 ---
 name: openmark_router
-description: Benchmark-driven model routing powered by OpenMark AI. Routes tasks to optimal models using real evaluation data.
+description: Benchmark-driven model routing powered by OpenMark AI (https://openmark.ai). Routes tasks to optimal models using real evaluation data -- accuracy, cost, latency, stability.
 version: 3.0.0
 user-invocable: false
 metadata: {"openclaw": {"requires": {"bins": ["python3"]}, "os": ["darwin", "linux", "win32"]}}

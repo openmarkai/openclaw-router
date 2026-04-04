@@ -213,10 +213,14 @@ Supported direct providers: Google (Gemini), Anthropic, OpenAI, DeepSeek, Mistra
 
 ```
 openmark-router/
-  plugin/
-    index.ts              # Plugin entry point (route_task tool + hook)
-    openclaw.plugin.json  # Plugin manifest
-    package.json          # npm package config
+  index.ts                # Plugin entry point (route_task tool + hook)
+  openclaw.plugin.json    # Plugin manifest
+  package.json            # npm package config
+  config.json             # Routing configuration
+  clawhub.json            # ClawHub marketplace metadata
+  SKILL.md                # Discovery metadata (tiny)
+  README.md               # This file
+  LICENSE                 # MIT
   scripts/
     router.py             # Core routing engine
     loader.py             # OpenMark CSV parser
@@ -224,10 +228,6 @@ openmark-router/
   benchmarks/
     examples/
       chatbot_potential.csv   # Sample CSV
-  config.json             # Routing configuration
-  SKILL.md                # Discovery metadata (tiny)
-  README.md               # This file
-  LICENSE                 # MIT
 ```
 
 ## Local Models
