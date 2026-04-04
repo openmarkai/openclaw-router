@@ -46,6 +46,56 @@ function runRouter(
   }
 }
 
+function loadCategories(baseDir: string): Array<{
+  name: string;
+  display_name: string;
+  description: string;
+}> {
+  const result = runRouter(baseDir, ["--classify"]);
+  if (
+    result.ok &&
+    (result.data as { action?: string }).action === "classify" &&
+    Array.isArray((result.data as { categories?: unknown[] }).categories)
+  ) {
+    return (
+      result.data as {
+        categories: Array<{
+          name: string;
+          display_name: string;
+          description: string;
+        }>;
+      }
+    ).categories;
+  }
+  return [];
+}
+
+function buildToolDescription(
+  categories: Array<{
+    name: string;
+    display_name: string;
+    description: string;
+  }>,
+): string {
+  const base =
+    "Route to the optimal model for a task. " +
+    "BEFORE answering any substantive user message, check if it matches one of " +
+    "the benchmark categories below. If it does, call this tool with the " +
+    "category name. Display the routing card from the result, then answer " +
+    "the user's request. If no category matches, skip this tool and respond normally. " +
+    "Do NOT call this for greetings, follow-ups, or casual chat.";
+
+  if (categories.length === 0) {
+    return base + "\n\nNo benchmark categories are currently loaded.";
+  }
+
+  const catLines = categories
+    .map((c) => `- ${c.name}: ${c.display_name} — ${c.description}`)
+    .join("\n");
+
+  return `${base}\n\nAvailable benchmark categories:\n${catLines}`;
+}
+
 export default definePluginEntry({
   id: "openmark-router",
   name: "OpenMark AI Router",
@@ -54,14 +104,15 @@ export default definePluginEntry({
 
   register(api) {
     const baseDir = getBaseDir();
+    const categories = baseDir ? loadCategories(baseDir) : [];
+
+    api.logger.info(
+      `[openmark-router] loaded ${categories.length} benchmark categories`,
+    );
 
     api.registerTool({
       name: "route_task",
-      description:
-        "Route to the optimal model for a task category. Call this tool when the " +
-        "standalone hook injects benchmark categories into the message. Pass the " +
-        "matching category name. Display the routing card from the result, then " +
-        "answer the user's request.",
+      description: buildToolDescription(categories),
       parameters: {
         type: "object" as const,
         properties: {
