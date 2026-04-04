@@ -3,14 +3,6 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-const CACHE_TTL_MS = 60_000;
-let cachedCategories: Array<{
-  name: string;
-  display_name: string;
-  description: string;
-}> | null = null;
-let cacheTimestamp = 0;
-
 function getBaseDir(): string | null {
   const candidates = [
     __dirname,
@@ -54,40 +46,6 @@ function runRouter(
   }
 }
 
-function getCategories(baseDir: string) {
-  const now = Date.now();
-  if (cachedCategories !== null && now - cacheTimestamp < CACHE_TTL_MS) {
-    return cachedCategories;
-  }
-
-  const result = runRouter(baseDir, ["--classify"]);
-  if (
-    result.ok &&
-    (result.data as { action?: string }).action === "classify" &&
-    Array.isArray((result.data as { categories?: unknown[] }).categories)
-  ) {
-    cachedCategories = (result.data as { categories: typeof cachedCategories })
-      .categories;
-  } else {
-    cachedCategories = null;
-  }
-  cacheTimestamp = now;
-  return cachedCategories;
-}
-
-function isGreeting(text: string): boolean {
-  if (!text || text.length < 3) return true;
-  const t = text.trim().toLowerCase();
-  if (t.length > 80) return false;
-  const patterns = [
-    /^(hi|hey|hello|yo|sup|hola|howdy|hiya|morning|evening|afternoon)\b/,
-    /^(thanks|thank you|thx|ty|cheers|ok|okay|k|sure|yep|yes|no|nah|bye|goodbye|later|cya)\b/,
-    /^(good morning|good evening|good night|good afternoon)\b/,
-    /^\//,
-  ];
-  return patterns.some((r) => r.test(t));
-}
-
 export default definePluginEntry({
   id: "openmark-router",
   name: "OpenMark AI Router",
@@ -100,10 +58,10 @@ export default definePluginEntry({
     api.registerTool({
       name: "route_task",
       description:
-        "Route to the optimal model for a benchmark category. " +
-        "Call this when a user message matches one of the benchmark " +
-        "categories injected into the conversation. Pass the category " +
-        "name and optionally a strategy override.",
+        "Route to the optimal model for a task category. Call this tool when the " +
+        "standalone hook injects benchmark categories into the message. Pass the " +
+        "matching category name. Display the routing card from the result, then " +
+        "answer the user's request.",
       parameters: {
         type: "object" as const,
         properties: {
@@ -154,34 +112,5 @@ export default definePluginEntry({
         };
       },
     });
-
-    api.registerHook("message:preprocessed", async (event: {
-      type?: string;
-      action?: string;
-      context?: { bodyForAgent?: string };
-    }) => {
-      if (event.type !== "message" || event.action !== "preprocessed") return;
-      const body = event.context?.bodyForAgent;
-      if (!body || typeof body !== "string") return;
-      if (isGreeting(body)) return;
-      if (!baseDir) return;
-
-      const categories = getCategories(baseDir);
-      if (!categories || categories.length === 0) return;
-
-      const lines = [
-        "[OPENMARK ROUTER: Benchmark categories available. If the user's message matches a category, call the route_task tool with the category name. If none match, respond normally.]",
-        "",
-      ];
-      for (const cat of categories) {
-        lines.push(
-          `- ${cat.name}: ${cat.display_name} — ${cat.description}`,
-        );
-      }
-      lines.push("");
-
-      (event.context as { bodyForAgent: string }).bodyForAgent =
-        lines.join("\n") + body;
-    }, { name: "openmark-router-classify" });
   },
 });

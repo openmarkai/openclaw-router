@@ -11,9 +11,7 @@
   },
   "homepage": "https://openmark.ai",
   "openclaw": {
-    "extensions": [
-      "./index.ts"
-    ],
+    "extensions": ["./index.ts"],
     "compat": {
       "pluginApi": ">=2026.3.24-beta.2",
       "minGatewayVersion": "2026.3.28"
