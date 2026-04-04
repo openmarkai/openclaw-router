@@ -1,0 +1,33 @@
+{
+  "name": "@openmarkai/openclaw-router",
+  "version": "3.0.0",
+  "type": "module",
+  "description": "Benchmark-driven model routing for OpenClaw, powered by OpenMark AI",
+  "license": "MIT",
+  "author": "openmarkai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openmarkai/openclaw-router"
+  },
+  "homepage": "https://openmark.ai",
+  "openclaw": {
+    "extensions": ["./index.ts"],
+    "compat": {
+      "pluginApi": ">=2026.3.24-beta.2",
+      "minGatewayVersion": "2026.3.28"
+    },
+    "build": {
+      "openclawVersion": "2026.3.28",
+      "pluginSdkVersion": "2026.3.28"
+    }
+  },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "model-routing",
+    "benchmark",
+    "openmark",
+    "cost-optimization",
+    "llm-routing"
+  ]
+}
