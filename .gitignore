@@ -6,6 +6,10 @@ config.md
 
 .providers_cache.json
 .routing_state.json
+categories.json
+
+# User benchmark data (examples/ is tracked for format reference)
+benchmarks/*.csv
 
 node_modules/
 

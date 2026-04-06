@@ -477,8 +477,122 @@ def describe_categories(config: dict, base_dir: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Keyword-based message matching
+# ---------------------------------------------------------------------------
+
+_STOP_WORDS = frozenset(
+    "i me my we our you your he she it they them their a an the and but or"
+    " is am are was were be been being have has had do does did will would"
+    " shall should can could may might must need to of in on at by for with"
+    " from into about up out as so if not no nor this that these those"
+    " what which who whom when where how why all each every some any"
+    " there here then than also just only very too quite rather"
+    " help please make write create tell explain show give get let"
+    " want like need really actually".split()
+)
+
+
+def _tokenize(text: str) -> list[str]:
+    """Lowercase, strip punctuation, remove stop words."""
+    import re as _re
+    tokens = _re.findall(r"[a-z0-9]+", text.lower())
+    return [t for t in tokens if t not in _STOP_WORDS and len(t) > 2]
+
+
+def _build_category_keywords(benchmarks: list[dict]) -> list[dict]:
+    """Extract keyword sets from category metadata."""
+    result = []
+    for b in benchmarks:
+        desc = b.get("description") or ""
+        name = b.get("display_name") or b["category"]
+        combined = f"{name} {desc}".replace("_", " ")
+        tokens = _tokenize(combined)
+        result.append({
+            "category": b["category"],
+            "display_name": b.get("display_name"),
+            "keywords": set(tokens),
+            "description": desc,
+        })
+    return result
+
+
+def _score_match(message_tokens: list[str], cat_keywords: set[str]) -> float:
+    """Score a message against category keywords. Returns 0.0-1.0."""
+    if not cat_keywords or not message_tokens:
+        return 0.0
+    hits = sum(1 for t in message_tokens if t in cat_keywords)
+    unique_hits = len(set(message_tokens) & cat_keywords)
+    coverage = unique_hits / len(cat_keywords) if cat_keywords else 0
+    density = hits / len(message_tokens) if message_tokens else 0
+    return 0.6 * coverage + 0.4 * density
+
+
+def match_message(message: str, config: dict, base_dir: str,
+                  threshold: float = 0.08) -> tuple[str | None, float]:
+    """Match a user message to the best benchmark category.
+
+    Returns (category_name, score) or (None, 0.0).
+    """
+    benchmarks_dir = os.path.join(base_dir, config.get("benchmarks_dir", "benchmarks"))
+    all_benchmarks = load_benchmarks_dir(benchmarks_dir)
+
+    if not all_benchmarks:
+        return None, 0.0
+
+    cats = _build_category_keywords(all_benchmarks)
+    msg_tokens = _tokenize(message)
+
+    if not msg_tokens:
+        return None, 0.0
+
+    best_cat = None
+    best_score = 0.0
+
+    for cat in cats:
+        score = _score_match(msg_tokens, cat["keywords"])
+        if score > best_score:
+            best_score = score
+            best_cat = cat["category"]
+
+    if best_score >= threshold:
+        return best_cat, best_score
+    return None, best_score
+
+
+# ---------------------------------------------------------------------------
 # Deterministic flow: --classify, --route, --restore
 # ---------------------------------------------------------------------------
+
+def format_classify_card(result: dict, base_dir: str) -> str:
+    """Human-readable category list with embedded --route command for LLM fallback."""
+    if result.get("action") == "skip":
+        return result.get("reason", "No benchmarks loaded. Routing skipped.")
+
+    categories = result.get("categories", [])
+    if not categories:
+        return "No task categories available."
+
+    router_path = os.path.join(base_dir, "scripts", "router.py").replace("\\", "/")
+    config_path = os.path.join(base_dir, "config.json").replace("\\", "/")
+
+    lines = ["Available task categories:", ""]
+    for i, cat in enumerate(categories, 1):
+        name = cat.get("display_name") or cat["name"]
+        desc = cat.get("description", "")
+        lines.append(f"{i}. {name} — {desc}")
+    lines.append("")
+    lines.append(
+        "To route, run:  "
+        f"exec python3 {router_path} --route <category_name> --card"
+        f" --config {config_path}"
+    )
+
+    if result.get("restored_model"):
+        lines.insert(0, f"(Model restored to {result['restored_model']})")
+        lines.insert(1, "")
+
+    return "\n".join(lines)
+
 
 def classify(config: dict, base_dir: str) -> dict:
     """Return benchmark categories for LLM classification, or skip signal.
@@ -486,10 +600,27 @@ def classify(config: dict, base_dir: str) -> dict:
     If a previous routing state exists, restores the default model first
     (deterministic auto-restore). This ensures every classify call starts
     from a clean state without requiring the LLM to call --restore.
+
+    Manual locks (set via --lock) are respected: if the routing state has
+    "manual": true, auto-restore is skipped and classify returns a skip
+    signal so the locked model stays active.
     """
     restored = None
     sp = _state_path(base_dir)
     if sp.exists():
+        try:
+            state = json.loads(sp.read_text())
+        except Exception:
+            state = {}
+
+        if state.get("manual"):
+            return {
+                "action": "skip",
+                "reason": "manual route active",
+                "locked_category": state.get("routed_category"),
+                "locked_model": state.get("routed_model"),
+            }
+
         restore_result = execute_restore(base_dir)
         if restore_result.get("status") == "ok":
             restored = restore_result.get("model_set")
@@ -579,10 +710,15 @@ def _state_path(base_dir: str) -> Path:
 
 
 def execute_route(category: str, config: dict, base_dir: str,
-                  strategy_override: str | None = None) -> dict:
+                  strategy_override: str | None = None,
+                  manual: bool = False) -> dict:
     """
     Full deterministic routing: compute route, switch model, set fallbacks,
     save state, return pre-formatted card. The LLM just displays the output.
+
+    When manual=True, the routing state is marked as a manual lock. The hook
+    will skip auto-restore on subsequent messages, keeping this model active
+    until the user explicitly unlocks.
     """
     if strategy_override:
         config["routing_strategy"] = strategy_override
@@ -608,6 +744,7 @@ def execute_route(category: str, config: dict, base_dir: str,
         "previous_model": config.get("default_model", ""),
         "fallbacks": fallback_models,
         "routed_at": datetime.now().isoformat(),
+        "manual": manual,
     }
     try:
         _state_path(base_dir).write_text(json.dumps(state, indent=2))
@@ -804,6 +941,18 @@ def main():
         "--restore", action="store_true",
         help="Restore previous model after routed task completes",
     )
+    parser.add_argument(
+        "--match",
+        help="Match a user message to a category and route if found (all-in-one)",
+    )
+    parser.add_argument(
+        "--lock", action="store_true",
+        help="With --route: lock this category (skip auto-restore on future messages)",
+    )
+    parser.add_argument(
+        "--unlock", action="store_true",
+        help="Clear a manual route lock and restore the default model",
+    )
 
     # Legacy / utility modes
     parser.add_argument("--task", "-t", help="(Legacy) Route without executing model switch")
@@ -838,6 +987,10 @@ def main():
             "balanced",
         ],
         help="Override routing strategy from config",
+    )
+    parser.add_argument(
+        "--card", action="store_true",
+        help="With --route: output plain text card only (no JSON wrapper)",
     )
     parser.add_argument("--config", "-c", help="Path to config.json")
     parser.add_argument(
@@ -883,15 +1036,54 @@ def main():
 
     if args.classify:
         result = classify(config, base_dir)
-        print(json.dumps(result, indent=2))
+        cache_path = os.path.join(base_dir, "categories.json")
+        try:
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2)
+        except Exception:
+            pass
+        if args.card:
+            print(format_classify_card(result, base_dir))
+        else:
+            print(json.dumps(result, indent=2))
         sys.exit(0)
+
+    if args.match:
+        category, score = match_message(args.match, config, base_dir)
+        if category:
+            result = execute_route(
+                category, config, base_dir,
+                strategy_override=args.strategy,
+            )
+            if args.card and result.get("status") == "ok" and result.get("card"):
+                print(result["card"])
+            else:
+                print(json.dumps(result, indent=2))
+            sys.exit(0 if result.get("status") == "ok" else 1)
+        else:
+            if args.card:
+                sys.exit(0)
+            print(json.dumps({"status": "no_match", "score": round(score, 4)}))
+            sys.exit(0)
+
+    if args.unlock:
+        result = execute_restore(base_dir)
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("status") == "ok" else 1)
 
     if args.route:
         result = execute_route(
             args.route, config, base_dir,
             strategy_override=args.strategy,
+            manual=args.lock,
         )
-        print(json.dumps(result, indent=2))
+        if args.card and result.get("status") == "ok" and result.get("card"):
+            card = result["card"]
+            if args.lock:
+                card += "\n\n(Locked — this model stays active until you send /openmark_router off)"
+            print(card)
+        else:
+            print(json.dumps(result, indent=2))
         sys.exit(0 if result.get("status") == "ok" else 1)
 
     if args.restore:

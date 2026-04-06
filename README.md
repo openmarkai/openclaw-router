@@ -7,21 +7,29 @@ Stop guessing which model to use. Route every task to the optimal model using re
 ## Install
 
 ```bash
-openclaw plugins install openmark-router
+openclaw skills install openmark-router
 ```
+
+Then enable the routing hook (one-time):
+
+```bash
+cp -r ~/.openclaw/workspace/skills/openmark-router/hooks/openmark-router-classify ~/.openclaw/workspace/hooks/openmark-router-classify
+```
+
+Restart the gateway or start a new session.
 
 ## Quick Start
 
 1. **Benchmark** your recurring tasks on [OpenMark AI](https://openmark.ai) (100+ models)
 2. **Export** -- click **Export -> OpenClaw** on the Results tab
 3. **Send** the CSV to your agent in chat (drag-and-drop on Telegram, Discord, etc.)
-4. **Done** -- the plugin routes automatically from here
+4. **Done** -- the router activates automatically from here
 
 ### Example
 
 You send: "Write me a LinkedIn post about our product launch"
 
-The plugin detects a matching benchmark, routes to the best model, and shows:
+The router detects a matching benchmark, routes to the best model, and shows:
 
 ```
 Routed to gpt-5.4-nano (openai) -- Content Creation Benchmark
@@ -34,6 +42,46 @@ Strategy: balanced  |  Data: fresh
 ```
 
 Your task then executes on the optimal model. No manual switching. No heuristics.
+
+## How It Works
+
+The skill installs two components:
+
+1. **An `agent:bootstrap` hook** -- fires at the start of every agent session. Loads benchmark categories (from a smart cache or by running `router.py --classify`), handles auto-restore of previous routing state, and injects a virtual `ROUTING.md` file into the agent's bootstrap context. The agent always sees the available categories without needing to run any commands.
+
+2. **SKILL.md instructions** -- tell the agent to semantically match the user's message to a category and run `exec python3 router.py --route <category> --card`. The routing script handles everything deterministically: provider detection, routing math, model switching, fallback setup, and card formatting.
+
+```
+Agent session starts
+    |
+    v
+Hook fires (agent:bootstrap):
+  - auto-restores previous model if needed
+  - loads categories (cached or via --classify)
+  - injects ROUTING.md into agent context
+    |
+    v
+LLM reads ROUTING.md, semantically matches user intent
+    |
+    v
+LLM calls: exec python3 router.py --route <category> --card
+    |
+    v
+Script runs --route (deterministic):
+  - detects providers (cached)
+  - runs routing math
+  - switches model (openclaw models set)
+  - sets benchmark-ranked fallbacks
+  - generates routing card
+    |
+    v
+Card returned to LLM -> displayed to user
+    |
+    v
+Task executes on optimal model
+```
+
+**The LLM's only job is semantic matching** -- deciding which category (if any) fits the user's message. Everything else is deterministic code. Same data, same result, every time.
 
 ## Why Custom Benchmarking Matters
 
@@ -54,47 +102,6 @@ Published $/M token pricing is misleading. Models tokenize differently -- the sa
 ### What custom benchmarking changes
 
 When you benchmark on [OpenMark AI](https://openmark.ai), you're testing models on **your specific task**, with **your specific prompts**, against **your specific evaluation criteria**. The router then uses that data -- not heuristics, not leaderboard scores, not blanket categories.
-
-## How It Works
-
-The plugin registers two things in OpenClaw:
-
-1. **A `route_task` tool** -- the LLM calls this with a benchmark category name to trigger routing. The tool handler runs the routing engine, switches the model, sets fallbacks, and returns the routing card. All deterministic.
-
-2. **A `message:preprocessed` hook** -- fires on every incoming message, runs the classification engine, and injects available benchmark categories into the agent's context. The LLM always sees the categories without needing to remember anything.
-
-```
-User message arrives
-    |
-    v
-Hook runs --classify (code, deterministic)
-    |
-    v
-Categories injected into agent context
-    |
-    v
-LLM sees categories, calls route_task("content_creation")
-    |
-    v
-Tool handler runs --route (code, deterministic):
-  - detects providers (cached)
-  - runs routing math
-  - switches model (openclaw models set)
-  - sets benchmark-ranked fallbacks
-  - generates routing card
-    |
-    v
-Card returned to LLM -> displayed to user
-    |
-    v
-Task executes on optimal model
-```
-
-**The LLM's only job is classification** -- matching the user's intent to a benchmark category. Everything else is deterministic code. Same data, same result, every time.
-
-### Why a plugin, not a skill
-
-Skills rely on the LLM reading SKILL.md instructions and choosing to run commands. This is unreliable -- lightweight models skip steps, accumulated conversation context drowns out instructions, and different models follow instructions differently. A plugin registers a native tool that the LLM simply *calls*. The classification choice IS the trigger. No second step, no "decide to run a command."
 
 ## Routing Engine
 
@@ -140,7 +147,7 @@ The router sets fallback models ranked by the same benchmark data. If the primar
 
 ## Routing Card
 
-Generated entirely by the Python script -- zero LLM generation cost. The LLM just displays the tool result.
+Generated entirely by the Python script -- zero LLM generation cost. The LLM just displays the result.
 
 ```
 Routed to codestral-latest (Mistral) -- Chat Bot Potential
@@ -154,6 +161,25 @@ Strategy: balanced  |  Data: fresh
 
 After the first routing, reply "cost" or "speed" to re-route with a different strategy.
 
+## Adding Benchmarks
+
+### Via chat (recommended)
+
+Send the CSV file to your agent in chat (Telegram, Discord, etc.). The agent validates the format, extracts the task name, and saves it to the benchmarks folder.
+
+### Manually
+
+Place CSV files in the `benchmarks/` directory inside the skill folder. Use **Export -> OpenClaw** on [OpenMark AI](https://openmark.ai) for the correct format.
+
+## Manual Lock
+
+By default, the router dynamically selects the best model per message. For extended work on a specific task, you can lock to a category:
+
+- **Lock**: Tell the agent `/openmark_router <category>` or ask it to lock to a task. The `--lock` flag keeps the optimal model active across all messages until you unlock.
+- **Unlock**: Tell the agent `/openmark_router off`. This restores the default model and resumes dynamic routing.
+
+While locked, the bootstrap hook skips category injection and auto-restore -- the locked model handles everything.
+
 ## Trust and Security
 
 - **Clean install**: Python stdlib only. No pip dependencies.
@@ -162,11 +188,11 @@ After the first routing, reply "cost" or "speed" to re-route with a different st
 - **No network requests**: All data is local CSV files. No telemetry.
 - **Agent is the classifier**: No separate classifier model, no hidden API calls.
 - **No keyword heuristics**: Classification is based on full task descriptions from OpenMark AI.
-- **Minimal token overhead**: ~200-400 tokens per routed message (category descriptions). Non-matching messages add zero overhead.
+- **Minimal token overhead**: ~200-400 tokens for injected category descriptions (via bootstrap). Present in every session, not per-message.
 
 ## Configuration
 
-Edit `config.json` in the plugin directory, or tell the agent (e.g. "set routing strategy to best_cost_efficiency").
+Edit `config.json` in the skill directory, or tell the agent (e.g. "set routing strategy to best_cost_efficiency").
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -198,37 +224,31 @@ Use **Export -> OpenClaw** on [OpenMark AI](https://openmark.ai). The CSV includ
 
 Both direct API providers and OpenRouter are supported.
 
-## Provider Mapping
-
-Model keys are not limited to OpenClaw's built-in catalog. OpenClaw accepts any model key as long as the provider's API key is configured -- the catalog is for discovery, not an allowlist. Every model in the OpenMark AI roster can be routed.
-
-Supported direct providers: Google (Gemini), Anthropic, OpenAI, DeepSeek, Mistral, xAI, MiniMax, Together AI. Plus any model available via OpenRouter.
-
-## Supported Modalities
-
-- **Input**: Text-extractable files (.txt, .md, .csv, .json, .xlsx, .pdf, .docx, .rtf, code files) and vision images (.jpg, .png, .webp, .gif, .bmp)
-- **Output**: Text
-
 ## Project Structure
 
 ```
 openmark-router/
-  index.ts                # Plugin entry point (route_task tool + hook)
-  openclaw.plugin.json    # Plugin manifest
-  package.json            # npm package config
+  SKILL.md                # Agent instructions
   config.json             # Routing configuration
   clawhub.json            # ClawHub marketplace metadata
-  SKILL.md                # Discovery metadata (tiny)
   README.md               # This file
   LICENSE                 # MIT
   scripts/
     router.py             # Core routing engine
     loader.py             # OpenMark CSV parser
     adapter.py            # Model ID translation
+  hooks/
+    openmark-router-classify/
+      HOOK.md             # Hook metadata
+      handler.js          # Category injection hook
   benchmarks/
     examples/
       chatbot_potential.csv   # Sample CSV
 ```
+
+## Provider Mapping
+
+Supported direct providers: Google (Gemini), Anthropic, OpenAI, DeepSeek, Mistral, xAI, MiniMax, Together AI. Plus any model available via OpenRouter. OpenClaw accepts any model key as long as the provider's API key is configured.
 
 ## Local Models
 
@@ -238,7 +258,7 @@ Want more models added? Contact [support@openmark.ai](mailto:support@openmark.ai
 
 ## Future Roadmap
 
-- **Direct API/MCP integration**: The plugin will call the OpenMark AI API directly -- benchmark tasks and route without manual CSV export.
+- **Direct API/MCP integration**: Call the OpenMark AI API directly -- benchmark tasks and route without manual CSV export.
 - **Subfolder/subcategory support**: Organize benchmarks into groups with grouped menus.
 
 ## Requirements

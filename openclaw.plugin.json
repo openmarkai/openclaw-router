@@ -1,9 +1,0 @@
-{
-  "id": "openmark-router",
-  "name": "OpenMark AI Router",
-  "description": "Benchmark-driven model routing. Routes tasks to optimal models using real evaluation data — accuracy, cost, latency, stability — from OpenMark AI. Registers a route_task tool and auto-injects benchmark categories on every message.",
-  "configSchema": {
-    "type": "object",
-    "additionalProperties": false
-  }
-}
