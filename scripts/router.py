@@ -564,7 +564,7 @@ def match_message(message: str, config: dict, base_dir: str,
 # ---------------------------------------------------------------------------
 
 def format_classify_card(result: dict, base_dir: str) -> str:
-    """Human-readable category list with embedded --route command for LLM fallback."""
+    """Human-readable category list with embedded route command for LLM fallback."""
     if result.get("action") == "skip":
         return result.get("reason", "No benchmarks loaded. Routing skipped.")
 
@@ -572,20 +572,15 @@ def format_classify_card(result: dict, base_dir: str) -> str:
     if not categories:
         return "No task categories available."
 
-    router_path = os.path.join(base_dir, "scripts", "router.py").replace("\\", "/")
-    config_path = os.path.join(base_dir, "config.json").replace("\\", "/")
+    route_path = os.path.join(base_dir, "scripts", "route.py").replace("\\", "/")
 
     lines = ["Available task categories:", ""]
     for i, cat in enumerate(categories, 1):
         name = cat.get("display_name") or cat["name"]
         desc = cat.get("description", "")
-        lines.append(f"{i}. {name} — {desc}")
+        lines.append(f"{i}. `{cat['name']}` — {name}: {desc}")
     lines.append("")
-    lines.append(
-        "To route, run:  "
-        f"exec python3 {router_path} --route <category_name> --card"
-        f" --config {config_path}"
-    )
+    lines.append(f"To route, run:  exec python3 {route_path} TASK_NAME")
 
     if result.get("restored_model"):
         lines.insert(0, f"(Model restored to {result['restored_model']})")

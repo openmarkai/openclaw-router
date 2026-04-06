@@ -76,13 +76,10 @@ function runClassify(skillDir) {
   return null;
 }
 
-function buildCategoryBlock(cat, routerPath, configPath) {
+function buildCategoryLine(cat) {
   const desc = cat.description || "";
-  const name = cat.display_name || cat.name;
-  const cmd =
-    `exec python3 ${routerPath} --route ${cat.name} --card --config ${configPath}`;
-
-  return `- **${name}** — ${desc}\n\n      ${cmd}`;
+  const displayName = cat.display_name || cat.name;
+  return `- \`${cat.name}\` — ${displayName}: ${desc}`;
 }
 
 const handler = async (event) => {
@@ -95,6 +92,11 @@ const handler = async (event) => {
   const routingState = readRoutingState(skillDir);
 
   if (routingState?.manual) {
+    files.push({
+      path: "virtual://openmark-router/ROUTING.md",
+      baseName: "ROUTING.md",
+      content: `# ROUTING.md — Model Routing\n\nManual lock active: model is locked to \`${routingState.routed_category || "unknown"}\`.\nDo NOT run any routing commands. Reply normally.\nTo unlock, the user can send \`/openmark_router off\`.`,
+    });
     return;
   }
 
@@ -111,22 +113,35 @@ const handler = async (event) => {
 
   if (!categories || categories.length === 0) return;
 
-  const routerPath = skillDir.replace(/\\/g, "/") + "/scripts/router.py";
-  const configPath = skillDir.replace(/\\/g, "/") + "/config.json";
+  const routePath = skillDir.replace(/\\/g, "/") + "/scripts/route.py";
 
-  const categoryBlocks = categories
-    .map((c) => buildCategoryBlock(c, routerPath, configPath))
-    .join("\n\n");
+  const categoryLines = categories.map((c) => buildCategoryLine(c)).join("\n");
 
-  const routingMd = `# Model Routing — ROUTING.md
+  const routingMd = `# ROUTING.md — Model Routing
 
-Task categories loaded from benchmarks. For every substantive user message,
-match it to one of these categories. If it matches, run the exact command
-shown. Include the command output verbatim at the top of your reply.
+Match the user message to a task below.
 
-${categoryBlocks}
+## Tasks
 
-Skip routing for greetings, follow-ups, yes/no answers, or casual chat.`;
+${categoryLines}
+
+## Action
+
+If a task matches, run:
+
+    exec python3 ${routePath} TASK_NAME
+
+Replace TASK_NAME with the matching task name (the backtick-quoted value).
+Include the command output verbatim at the top of your reply.
+Skip routing for greetings, or if no task matches.
+
+## Manual Commands
+
+When the user sends \`/openmark_router\`:
+- Without args: list the tasks above.
+- With a task name: run \`exec python3 ${routePath} TASK_NAME --lock\`
+  This locks the model so it stays active across messages.
+- \`/openmark_router off\`: run \`exec python3 ${routePath} --unlock\``;
 
   files.push({
     path: "virtual://openmark-router/ROUTING.md",
