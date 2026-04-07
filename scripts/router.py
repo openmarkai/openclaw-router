@@ -787,6 +787,13 @@ def _apply_model_config(primary: str, fallbacks: list[str] | None = None) -> tup
     defaults = agents.setdefault("defaults", {})
     model = defaults.setdefault("model", {})
 
+    known_models = set(defaults.get("models", {}).keys())
+    if known_models:
+        if primary not in known_models:
+            return False, f"Model {primary} not in user's configured models"
+        if fallbacks is not None:
+            fallbacks = [fb for fb in fallbacks if fb in known_models]
+
     model["primary"] = primary
     if fallbacks is not None:
         model["fallbacks"] = fallbacks
