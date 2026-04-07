@@ -197,7 +197,7 @@ Edit `config.json` in the skill directory, or tell the agent (e.g. "set routing 
 | Field | Default | Description |
 |-------|---------|-------------|
 | `available_providers` | `[]` | Empty = auto-detect (recommended) |
-| `default_model` | `"google/gemini-3-flash"` | Fallback when no benchmark matches |
+| `default_model` | `"google/gemini-3.1-flash-lite-preview"` | Model restored after routing completes |
 | `routing_strategy` | `"balanced"` | Default ranking strategy |
 | `cost_ceiling` | `null` | Max cost per run (for `best_under_budget`) |
 | `latency_ceiling_s` | `null` | Max seconds per run (for `best_under_latency`) |

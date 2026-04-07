@@ -83,11 +83,21 @@ function buildCategoryLine(cat) {
 }
 
 const handler = async (event) => {
+  const tag = `[openmark-router]`;
+  console.log(`${tag} agent:bootstrap fired — agentId=${event.context?.agentId ?? "unknown"}`);
+
   const files = event.context?.bootstrapFiles;
-  if (!Array.isArray(files)) return;
+  if (!Array.isArray(files)) {
+    console.log(`${tag} SKIP — no bootstrapFiles array`);
+    return;
+  }
 
   const skillDir = findSkillDir();
-  if (!skillDir) return;
+  if (!skillDir) {
+    console.log(`${tag} SKIP — skill dir not found`);
+    return;
+  }
+  console.log(`${tag} skill dir: ${skillDir}`);
 
   const routingState = readRoutingState(skillDir);
 
@@ -100,19 +110,37 @@ const handler = async (event) => {
     return;
   }
 
-  let categories = null;
-
-  if (routingState || !cacheIsFresh(skillDir)) {
-    categories = runClassify(skillDir);
-    if (!categories) {
-      categories = readCachedCategories(skillDir);
-    }
-  } else {
-    categories = readCachedCategories(skillDir);
+  let stateAge = Infinity;
+  if (routingState) {
+    try {
+      stateAge = Date.now() - statSync(join(skillDir, ".routing_state.json")).mtimeMs;
+    } catch {}
   }
 
-  if (!categories || categories.length === 0) return;
+  const shouldRestore = routingState && !routingState.manual && stateAge > 60_000;
 
+  let categories;
+  if (shouldRestore) {
+    console.log(`${tag} state is ${Math.round(stateAge / 1000)}s old — auto-restoring`);
+    categories = runClassify(skillDir);
+    if (!categories) categories = readCachedCategories(skillDir);
+  } else {
+    if (routingState) {
+      console.log(`${tag} state is ${Math.round(stateAge / 1000)}s old — skipping restore (same turn)`);
+    }
+    categories = readCachedCategories(skillDir);
+    if (!categories) {
+      console.log(`${tag} cache miss — running classify to generate cache`);
+      categories = runClassify(skillDir);
+    }
+  }
+
+  if (!categories || categories.length === 0) {
+    console.log(`${tag} SKIP — no categories loaded`);
+    return;
+  }
+
+  console.log(`${tag} ${categories.length} categories loaded — injecting ROUTING.md`);
   const routePath = skillDir.replace(/\\/g, "/") + "/scripts/route.py";
 
   const categoryLines = categories.map((c) => buildCategoryLine(c)).join("\n");
