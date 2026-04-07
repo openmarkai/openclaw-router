@@ -2,7 +2,10 @@
 OPENCLAW_ROUTING_SKILL_PLAN.md
 SYSTEM_DESIGN.md
 TESTING_CHECKLIST.md
+ROADMAP.md
 config.md
+
+scripts/check_sync.py
 
 .providers_cache.json
 .routing_state.json

@@ -788,11 +788,12 @@ def _apply_model_config(primary: str, fallbacks: list[str] | None = None) -> tup
     model = defaults.setdefault("model", {})
 
     known_models = set(defaults.get("models", {}).keys())
-    if known_models:
-        if primary not in known_models:
-            return False, f"Model {primary} not in user's configured models"
-        if fallbacks is not None:
-            fallbacks = [fb for fb in fallbacks if fb in known_models]
+    if known_models and primary not in known_models:
+        print(
+            f"[openmark-router] NOTE: {primary} not in configured models list "
+            f"— writing anyway (gateway will resolve at runtime)",
+            file=sys.stderr,
+        )
 
     model["primary"] = primary
     if fallbacks is not None:
