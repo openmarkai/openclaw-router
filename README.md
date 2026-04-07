@@ -67,11 +67,10 @@ LLM reads ROUTING.md, semantically matches user intent
 LLM calls: exec python3 router.py --route <category> --card
     |
     v
-Script runs --route (deterministic):
+Script runs --route (~60ms, deterministic):
   - detects providers (cached)
   - runs routing math
-  - switches model (openclaw models set)
-  - sets benchmark-ranked fallbacks
+  - writes model + fallbacks to openclaw.json (single atomic write)
   - generates routing card
     |
     v
@@ -105,7 +104,7 @@ When you benchmark on [OpenMark AI](https://openmark.ai), you're testing models 
 
 ## Routing Engine
 
-The model selection logic is fully deterministic -- no LLM involvement, no randomness.
+The model selection logic is fully deterministic -- no LLM involvement, no randomness. The full routing pipeline (provider detection, benchmark loading, ranking math, config write, card generation) completes in **~60ms** on warm runs.
 
 ### 6-Step Cascade Sort
 
@@ -135,7 +134,7 @@ Always identifies the model that's nearly as good but much cheaper -- within the
 
 | Strategy | What It Optimizes |
 |----------|------------------|
-| `balanced` | Weighted: accuracy (40%) + cost-efficiency (30%) + speed (20%) + stability (10%) |
+| `balanced` | Weighted: accuracy (40%) + cost-efficiency (20%) + speed (25%) + stability (15%). Configurable via `balanced_weights`. |
 | `best_score` | Highest benchmark accuracy |
 | `best_cost_efficiency` | Best accuracy per dollar among viable models |
 | `best_under_budget` | Highest score within your cost ceiling |
@@ -183,8 +182,8 @@ While locked, the bootstrap hook skips category injection and auto-restore -- th
 ## Trust and Security
 
 - **Clean install**: Python stdlib only. No pip dependencies.
-- **No API key access**: Uses `openclaw models status` for provider discovery. Never reads system files.
-- **No file modifications outside its own directory**.
+- **No API key access**: Uses `openclaw models status` for provider discovery. Never reads credentials.
+- **Minimal file writes**: Writes to `openclaw.json` (model/fallback config) and its own state files. No modifications to other system files.
 - **No network requests**: All data is local CSV files. No telemetry.
 - **Agent is the classifier**: No separate classifier model, no hidden API calls.
 - **No keyword heuristics**: Classification is based on full task descriptions from OpenMark AI.
@@ -205,6 +204,7 @@ Edit `config.json` in the skill directory, or tell the agent (e.g. "set routing 
 | `min_completion_pct` | `80` | Skip models below this completion rate |
 | `min_stability_threshold` | `10.0` | Skip models with variance above this |
 | `fallback_count` | `2` | Number of fallback models to set |
+| `balanced_weights` | `{"accuracy": 0.40, "cost_efficiency": 0.20, "speed": 0.25, "stability": 0.15}` | Custom weights for `balanced` strategy |
 
 **Tip:** Use a fast, low-cost model as your OpenClaw default (e.g. Gemini flash-lite, Claude Haiku, GPT-5.4-mini). The router switches to the optimal model for each task, so your default only needs to handle classification and general conversation.
 

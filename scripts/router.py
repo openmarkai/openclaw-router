@@ -265,6 +265,12 @@ def rank_by_strategy(entries: list[dict], strategy: str, config: dict) -> list[d
         if is_tied:
             return cost_speed_sort(viable)
 
+        w = config.get("balanced_weights", {})
+        w_score = w.get("accuracy", 0.40)
+        w_cost = w.get("cost_efficiency", 0.20)
+        w_speed = w.get("speed", 0.25)
+        w_stab = w.get("stability", 0.15)
+
         scores = normalize([e["score_pct"] for e in viable])
         efficiencies = normalize([e["acc_per_dollar"] for e in viable])
         speeds = normalize([1.0 / max(e["time_s"], 0.01) for e in viable])
@@ -273,10 +279,10 @@ def rank_by_strategy(entries: list[dict], strategy: str, config: dict) -> list[d
         ranked = []
         for i, e in enumerate(viable):
             composite = (
-                0.4 * scores[i]
-                + 0.3 * efficiencies[i]
-                + 0.2 * speeds[i]
-                + 0.1 * stabilities[i]
+                w_score * scores[i]
+                + w_cost * efficiencies[i]
+                + w_speed * speeds[i]
+                + w_stab * stabilities[i]
             )
             ranked.append((composite, e))
 
@@ -342,7 +348,7 @@ STRATEGY_REASONS = {
     "best_cost_efficiency": "Best accuracy per dollar among viable models (within viability floor of top scorer)",
     "best_under_budget": "Highest score within cost ceiling",
     "best_under_latency": "Highest score within latency ceiling",
-    "balanced": "Best weighted combination of accuracy, cost-efficiency, speed, and stability among viable models",
+    "balanced": "Weighted combination: accuracy 40%, cost-efficiency 20%, speed 25%, stability 15% (configurable via balanced_weights)",
 }
 
 
@@ -430,6 +436,19 @@ def route(task: str, config: dict, base_dir: str) -> dict:
     if alt_entry and alt_entry["model"] != ranked[0]["model"]:
         result["best_alternative"] = format_model_entry(alt_entry, available)
         result["best_alternative"]["vs_top"] = compute_savings(ranked[0], alt_entry)
+    elif len(entries) >= 2:
+        most_expensive = max(
+            (e for e in entries if e["model"] != ranked[0]["model"]),
+            key=lambda e: e["cost"],
+            default=None,
+        )
+        if most_expensive and most_expensive["cost"] > 0 and ranked[0]["cost"] > 0:
+            ratio = round(most_expensive["cost"] / ranked[0]["cost"], 1)
+            if ratio >= 1.5:
+                result["cost_comparison"] = {
+                    "model": most_expensive["model"],
+                    "cost_ratio": ratio,
+                }
 
     dupes = detect_duplicates(all_benchmarks)
     if dupes:
@@ -645,7 +664,8 @@ def classify(config: dict, base_dir: str) -> dict:
 
 def format_routing_card(primary: dict, display_name: str | None,
                         strategy: str, freshness: dict,
-                        best_alt: dict | None) -> str:
+                        best_alt: dict | None,
+                        cost_comparison: dict | None = None) -> str:
     """Generate pre-formatted routing card text."""
     model_name = primary.get("openmark_model", primary["model"])
     provider = primary["provider"]
@@ -672,7 +692,12 @@ def format_routing_card(primary: dict, display_name: str | None,
         proj_top = vs.get("projected_10k_top", 0)
         proj_alt = vs.get("projected_10k_alt", 0)
         if abs(proj_top - proj_alt) > 1:
-            lines.append(f"  Over 10K calls: ${proj_alt} vs ${proj_top}")
+            lines.append(f"Over 10K calls: ${proj_alt} vs ${proj_top}")
+
+    elif cost_comparison:
+        ratio = cost_comparison.get("cost_ratio", 0)
+        compared_to = cost_comparison.get("model", "next model")
+        lines.append(f"\n{model_name} is {ratio}x cheaper than {compared_to} \u2014 the clear winner.")
 
     fresh_label = "fresh"
     if freshness.get("stale"):
@@ -698,6 +723,84 @@ def _run_openclaw_cmd(args: list[str]) -> tuple[int, str, str]:
         return 1, "", "openclaw CLI not found in PATH"
     except subprocess.TimeoutExpired:
         return 1, "", "openclaw command timed out"
+
+
+def _find_openclaw_config() -> Path | None:
+    """Locate openclaw.json using the same resolution order as OpenClaw itself:
+    OPENCLAW_CONFIG_PATH > OPENCLAW_STATE_DIR > OPENCLAW_HOME >
+    CLAWDBOT_STATE_DIR (legacy) > ~/.openclaw/openclaw.json.
+    """
+    explicit = os.environ.get("OPENCLAW_CONFIG_PATH")
+    if explicit:
+        p = Path(explicit).expanduser()
+        if p.exists():
+            return p
+
+    for env_var in ("OPENCLAW_STATE_DIR", "OPENCLAW_HOME", "CLAWDBOT_STATE_DIR"):
+        val = os.environ.get(env_var)
+        if val:
+            p = Path(val).expanduser() / "openclaw.json"
+            if p.exists():
+                return p
+
+    default = Path.home() / ".openclaw" / "openclaw.json"
+    if default.exists():
+        return default
+
+    return None
+
+
+def _apply_model_config(primary: str, fallbacks: list[str] | None = None) -> tuple[bool, str]:
+    """Write primary model + fallbacks directly to openclaw.json in a single
+    atomic operation.  Falls back to sequential CLI calls if the config file
+    can't be located or parsed, but warns on stderr since the fallback is
+    ~700x slower.
+
+    Returns (success, error_message).
+    """
+    oc_path = _find_openclaw_config()
+    if not oc_path:
+        print(
+            "[openmark-router] WARNING: openclaw.json not found — falling "
+            "back to CLI commands (this is ~700x slower). Set "
+            "OPENCLAW_CONFIG_PATH or check your OpenClaw installation.",
+            file=sys.stderr,
+        )
+        errors = []
+        rc, _, err = _run_openclaw_cmd(["models", "set", primary])
+        if rc != 0:
+            errors.append(f"models set failed: {err}")
+        if fallbacks is not None:
+            _run_openclaw_cmd(["models", "fallbacks", "clear"])
+            for fb in fallbacks:
+                rc, _, err = _run_openclaw_cmd(["models", "fallbacks", "add", fb])
+                if rc != 0:
+                    errors.append(f"fallbacks add {fb}: {err}")
+        return (len(errors) == 0, "; ".join(errors))
+
+    try:
+        data = json.loads(oc_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return False, f"Failed to read openclaw.json: {e}"
+
+    agents = data.setdefault("agents", {})
+    defaults = agents.setdefault("defaults", {})
+    model = defaults.setdefault("model", {})
+
+    model["primary"] = primary
+    if fallbacks is not None:
+        model["fallbacks"] = fallbacks
+
+    meta = data.setdefault("meta", {})
+    meta["lastTouchedAt"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.") + \
+        f"{datetime.utcnow().microsecond // 1000:03d}Z"
+
+    try:
+        oc_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        return False, f"Failed to write openclaw.json: {e}"
+
+    return True, ""
 
 
 def _state_path(base_dir: str) -> Path:
@@ -749,15 +852,9 @@ def execute_route(category: str, config: dict, base_dir: str,
     # -- Execute model switch -----------------------------------------------
     errors = []
 
-    rc, _, err = _run_openclaw_cmd(["models", "set", primary_model])
-    if rc != 0:
-        errors.append(f"models set failed: {err}")
-
-    _run_openclaw_cmd(["models", "fallbacks", "clear"])
-    for fb in fallback_models:
-        rc, _, err = _run_openclaw_cmd(["models", "fallbacks", "add", fb])
-        if rc != 0:
-            errors.append(f"fallbacks add {fb} failed: {err}")
+    ok, err = _apply_model_config(primary_model, fallback_models)
+    if not ok:
+        errors.append(err)
 
     # -- Build card ---------------------------------------------------------
     card = format_routing_card(
@@ -766,6 +863,7 @@ def execute_route(category: str, config: dict, base_dir: str,
         strategy=strategy,
         freshness=result.get("freshness", {}),
         best_alt=result.get("best_alternative"),
+        cost_comparison=result.get("cost_comparison"),
     )
 
     output = {
@@ -799,11 +897,9 @@ def execute_restore(base_dir: str) -> dict:
     if not previous:
         return {"status": "error", "message": "No previous model in state."}
 
-    rc, _, err = _run_openclaw_cmd(["models", "set", previous])
-    if rc != 0:
+    ok, err = _apply_model_config(previous, [])
+    if not ok:
         return {"status": "error", "message": f"Model restore failed: {err}"}
-
-    _run_openclaw_cmd(["models", "fallbacks", "clear"])
 
     try:
         sp.unlink()
