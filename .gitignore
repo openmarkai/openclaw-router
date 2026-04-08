@@ -1,12 +1,17 @@
 # Internal ops/planning docs (not for public repo)
+PLAN.md
 OPENCLAW_ROUTING_SKILL_PLAN.md
 SYSTEM_DESIGN.md
 TESTING_CHECKLIST.md
 ROADMAP.md
+Thoughts on what direction to take for the model router.md
 config.md
 
-scripts/check_sync.py
+# Build output
+dist/
+*.js.map
 
+# Runtime state
 .providers_cache.json
 .routing_state.json
 categories.json
@@ -14,16 +19,22 @@ categories.json
 # User benchmark data (examples/ is tracked for format reference)
 benchmarks/*.csv
 
+# Dependencies
 node_modules/
+package-lock.json
 
+# Python
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+
+# Environment
 .env
 .venv/
 venv/
-*.egg-info/
-dist/
 build/
+
+# OS
 .DS_Store
 Thumbs.db

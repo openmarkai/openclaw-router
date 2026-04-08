@@ -1,0 +1,32 @@
+{
+  "id": "openmark-router",
+  "name": "OpenMark AI Router",
+  "description": "Benchmark-driven model routing. Routes tasks to optimal models using real evaluation data from OpenMark AI — accuracy, cost, latency, stability.",
+  "version": "7.0.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "classifier_model": {
+        "type": "string",
+        "description": "Model used for the isolated classification call (e.g. google/gemini-3.1-flash-lite-preview)",
+        "default": "google/gemini-3.1-flash-lite-preview"
+      },
+      "no_route_passthrough": {
+        "type": "string",
+        "description": "Model to use when no benchmark category matches (greetings, follow-ups, etc.)",
+        "default": "google/gemini-3-flash-preview"
+      },
+      "port": {
+        "type": "number",
+        "description": "Port for the embedded routing server",
+        "default": 2098
+      },
+      "show_routing_card": {
+        "type": "boolean",
+        "description": "Prepend routing card to responses when a task is routed",
+        "default": true
+      }
+    },
+    "additionalProperties": false
+  }
+}

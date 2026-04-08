@@ -1,0 +1,25 @@
+{
+  "name": "openmark-router",
+  "version": "7.0.0",
+  "description": "Benchmark-driven model routing for OpenClaw, powered by OpenMark AI. Routes tasks to optimal models using real evaluation data.",
+  "license": "MIT",
+  "author": "openmarkai",
+  "homepage": "https://openmark.ai",
+  "repository": "https://github.com/openmarkai/openclaw-router",
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.2.0"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "watch": "tsc --watch",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

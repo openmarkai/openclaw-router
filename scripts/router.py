@@ -890,6 +890,51 @@ def execute_route(category: str, config: dict, base_dir: str,
     return output
 
 
+def execute_recommend(category: str, config: dict, base_dir: str,
+                      strategy_override: str | None = None) -> dict:
+    """
+    Compute routing recommendation and card WITHOUT side effects.
+    Does not write to openclaw.json, does not save routing state.
+    Used by the v7 provider-based architecture where the plugin server
+    handles model forwarding directly.
+    """
+    if strategy_override:
+        config["routing_strategy"] = strategy_override
+
+    if not config.get("available_providers"):
+        detected = detect_providers(base_dir=base_dir)
+        if detected.get("providers"):
+            config["available_providers"] = detected["providers"]
+
+    result = route(category, config, base_dir)
+
+    if result["status"] != "ok":
+        return result
+
+    primary_model = result["primary"]["model"]
+    fallback_models = [f["model"] for f in result.get("fallbacks", [])]
+    strategy = result.get("strategy", "balanced")
+
+    card = format_routing_card(
+        primary=result["primary"],
+        display_name=result.get("display_name"),
+        strategy=strategy,
+        freshness=result.get("freshness", {}),
+        best_alt=result.get("best_alternative"),
+        cost_comparison=result.get("cost_comparison"),
+    )
+
+    return {
+        "status": "ok",
+        "model": primary_model,
+        "card": card,
+        "fallbacks": fallback_models,
+        "category": category,
+        "strategy": strategy,
+        "display_name": result.get("display_name"),
+    }
+
+
 def execute_restore(base_dir: str) -> dict:
     """Restore the previous model after a routed task completes."""
     sp = _state_path(base_dir)
@@ -1045,6 +1090,10 @@ def main():
         help="Match a user message to a category and route if found (all-in-one)",
     )
     parser.add_argument(
+        "--recommend",
+        help="Recommend a model for a category (no model switch, no state save). Used by v7 plugin.",
+    )
+    parser.add_argument(
         "--lock", action="store_true",
         help="With --route: lock this category (skip auto-restore on future messages)",
     )
@@ -1146,6 +1195,14 @@ def main():
         else:
             print(json.dumps(result, indent=2))
         sys.exit(0)
+
+    if args.recommend:
+        result = execute_recommend(
+            args.recommend, config, base_dir,
+            strategy_override=args.strategy,
+        )
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("status") == "ok" else 1)
 
     if args.match:
         category, score = match_message(args.match, config, base_dir)

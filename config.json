@@ -1,7 +1,9 @@
 {
-  "available_providers": [],
-  "default_model": "google/gemini-3-flash-preview",
+  "classifier_model": "google/gemini-3.1-flash-lite-preview",
+  "no_route_passthrough": "google/gemini-3-flash-preview",
   "routing_strategy": "balanced",
+  "port": 2098,
+  "show_routing_card": true,
   "cost_ceiling": null,
   "latency_ceiling_s": null,
   "freshness_warning_days": 30,
