@@ -21,7 +21,18 @@ export interface PluginApi {
   pluginConfig: Record<string, unknown>;
   registerProvider: (opts: ProviderRegistration) => void;
   registerService: (opts: ServiceRegistration) => void;
-  on: (event: string, handler: (event: any) => Promise<void> | void, opts?: { priority?: number }) => void;
+  on: (
+    event: string,
+    handler: (
+      event: any,
+      ctx?: any,
+    ) =>
+      | Promise<PluginHookBeforeModelResolveResult | void>
+      | PluginHookBeforeModelResolveResult
+      | void,
+    opts?: { priority?: number },
+  ) => void;
+  onConversationBindingResolved?: (handler: (event: any) => Promise<void> | void) => void;
   config?: any;
   runtime?: {
     modelAuth?: {
@@ -108,6 +119,13 @@ export interface RouterRecommendation {
     [key: string]: unknown;
   };
   message?: string;
+}
+
+export interface PluginHookBeforeModelResolveResult {
+  modelOverride?: string;
+  providerOverride?: string;
+  block?: boolean;
+  blockReason?: string;
 }
 
 export interface ClassifierResult {

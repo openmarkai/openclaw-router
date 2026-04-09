@@ -5,7 +5,7 @@
   "port": 2098,
   "gateway_port": 18789,
   "show_routing_card": true,
-  "restore_delay_s": 120,
+  "restore_delay_s": 30,
   "cost_ceiling": null,
   "latency_ceiling_s": null,
   "freshness_warning_days": 30,

@@ -804,9 +804,23 @@ def _apply_model_config(primary: str, fallbacks: list[str] | None = None) -> tup
     meta["lastTouchedAt"] = now.strftime("%Y-%m-%dT%H:%M:%S.") + \
         f"{now.microsecond // 1000:03d}Z"
 
+    new_content = json.dumps(data, indent=2, ensure_ascii=False)
+
+    # Atomic write: temp file → validate → rename.
+    # Protects against Google Drive sync truncation issues.
+    tmp_path = oc_path.with_suffix(".tmp")
     try:
-        oc_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_path.write_text(new_content, encoding="utf-8")
+        readback = tmp_path.read_text(encoding="utf-8")
+        json.loads(readback)
+        if sys.platform == "win32":
+            oc_path.unlink(missing_ok=True)
+        tmp_path.rename(oc_path)
     except Exception as e:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
         return False, f"Failed to write openclaw.json: {e}"
 
     return True, ""
@@ -844,13 +858,20 @@ def execute_route(category: str, config: dict, base_dir: str,
     fallback_models = [f["model"] for f in result.get("fallbacks", [])]
     strategy = result.get("strategy", "balanced")
 
+    # -- Save rollback target ------------------------------------------------
+    # We always want the next classification cycle to re-enter through the
+    # router alias, not through whatever concrete model happened to be active
+    # when the route was written.
+    previous = "openmark/auto"
+
     # -- Save state for --restore -------------------------------------------
     state = {
         "routed_category": category,
         "routed_model": primary_model,
-        "previous_model": config.get("default_model", ""),
+        "previous_model": previous,
         "fallbacks": fallback_models,
         "routed_at": datetime.now().isoformat(),
+        "remaining_concrete_turns": 1,
         "manual": manual,
     }
     try:
@@ -880,7 +901,7 @@ def execute_route(category: str, config: dict, base_dir: str,
         "card": card,
         "model_set": primary_model,
         "fallbacks_set": fallback_models,
-        "previous_model": config.get("default_model", ""),
+        "previous_model": previous,
         "category": category,
         "strategy": strategy,
     }
@@ -943,16 +964,9 @@ def execute_set_passthrough(model: str, base_dir: str) -> dict:
     match.  Writes the passthrough model to openclaw.json and saves state
     so that --restore can bring back openmark/auto.
     """
+    # Passthrough is a one-turn concrete handoff. The system should still
+    # restore to the router alias afterwards so later turns get classified.
     previous = "openmark/auto"
-    oc_path = _find_openclaw_config()
-    if oc_path:
-        try:
-            data = json.loads(oc_path.read_text(encoding="utf-8"))
-            current = data.get("agents", {}).get("defaults", {}).get("model", {}).get("primary", "")
-            if current:
-                previous = current
-        except Exception:
-            pass
 
     state = {
         "routed_category": "__passthrough__",
@@ -960,6 +974,7 @@ def execute_set_passthrough(model: str, base_dir: str) -> dict:
         "previous_model": previous,
         "fallbacks": [],
         "routed_at": datetime.now().isoformat(),
+        "remaining_concrete_turns": 1,
         "manual": False,
     }
     try:
@@ -979,7 +994,7 @@ def execute_set_passthrough(model: str, base_dir: str) -> dict:
 
 
 def execute_restore(base_dir: str) -> dict:
-    """Restore the previous model after a routed task completes."""
+    """Restore the router alias after a routed task completes."""
     sp = _state_path(base_dir)
     if not sp.exists():
         return {"status": "no_state", "message": "No routing state to restore."}
@@ -989,11 +1004,12 @@ def execute_restore(base_dir: str) -> dict:
     except Exception as e:
         return {"status": "error", "message": f"Failed to read state: {e}"}
 
-    previous = state.get("previous_model")
-    if not previous:
-        return {"status": "error", "message": "No previous model in state."}
+    # Always restore to the router alias so every new real user turn
+    # re-enters the classification flow, regardless of any stale
+    # concrete model captured in previous_model.
+    restored_model = "openmark/auto"
 
-    ok, err = _apply_model_config(previous, [])
+    ok, err = _apply_model_config(restored_model, [])
     if not ok:
         return {"status": "error", "message": f"Model restore failed: {err}"}
 
@@ -1004,8 +1020,8 @@ def execute_restore(base_dir: str) -> dict:
 
     return {
         "status": "ok",
-        "message": f"Restored to {previous}.",
-        "model_set": previous,
+        "message": f"Restored to {restored_model}.",
+        "model_set": restored_model,
     }
 
 

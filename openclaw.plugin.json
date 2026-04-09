@@ -34,7 +34,7 @@
       "restore_delay_s": {
         "type": "number",
         "description": "Seconds before auto-restoring openmark/auto as default model after routing",
-        "default": 120
+        "default": 30
       }
     },
     "additionalProperties": false

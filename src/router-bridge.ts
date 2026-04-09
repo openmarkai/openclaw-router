@@ -75,6 +75,7 @@ export async function restore(
   logger: PluginLogger,
 ): Promise<RouterRecommendation | null> {
   const routerPath = join(pluginDir, 'scripts', 'router.py');
+  const configPath = join(pluginDir, 'config.json');
 
   if (!existsSync(routerPath)) {
     logger.error(`[openmark-router] router.py not found at ${routerPath}`);
@@ -83,7 +84,7 @@ export async function restore(
 
   try {
     const stdout = await execPython(
-      [routerPath, '--restore'],
+      [routerPath, '--restore', '--config', configPath],
       logger,
     );
 
@@ -91,6 +92,43 @@ export async function restore(
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`[openmark-router] router.py --restore failed: ${msg}`);
+    return null;
+  }
+}
+
+/**
+ * Call router.py --match <message> to do keyword-based classification
+ * AND routing in a single call.  No LLM needed — runs entirely locally.
+ *
+ * If a match is found, this also writes the routed model + fallbacks
+ * to openclaw.json and saves routing state (same as routeCategory).
+ *
+ * Returns the routing result or null if no match / error.
+ */
+export async function matchAndRoute(
+  userMessage: string,
+  pluginDir: string,
+  logger: PluginLogger,
+): Promise<RouterRecommendation | null> {
+  const routerPath = join(pluginDir, 'scripts', 'router.py');
+  const configPath = join(pluginDir, 'config.json');
+
+  if (!existsSync(routerPath)) {
+    logger.error(`[openmark-router] router.py not found at ${routerPath}`);
+    return null;
+  }
+
+  try {
+    const stdout = await execPython(
+      [routerPath, '--match', userMessage, '--config', configPath],
+      logger,
+    );
+
+    const result = JSON.parse(stdout) as RouterRecommendation;
+    return result;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[openmark-router] router.py --match failed: ${msg}`);
     return null;
   }
 }
