@@ -4,11 +4,11 @@ import { existsSync } from 'node:fs';
 import type { PluginLogger, RouterRecommendation } from './types';
 
 /**
- * Call router.py --recommend <category> as a subprocess.
- * Returns the routing recommendation (model, card, fallbacks) without
- * writing to openclaw.json or saving routing state.
+ * Call router.py --route <category> as a subprocess.
+ * This WRITES the routed model + fallbacks to ~/.openclaw/openclaw.json
+ * and saves routing state for auto-restore.
  */
-export async function recommend(
+export async function routeCategory(
   category: string,
   pluginDir: string,
   logger: PluginLogger,
@@ -23,7 +23,7 @@ export async function recommend(
 
   try {
     const stdout = await execPython(
-      [routerPath, '--recommend', category, '--config', configPath],
+      [routerPath, '--route', category, '--config', configPath],
       logger,
     );
 
@@ -31,7 +31,66 @@ export async function recommend(
     return result;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    logger.error(`[openmark-router] router.py --recommend failed: ${msg}`);
+    logger.error(`[openmark-router] router.py --route failed: ${msg}`);
+    return null;
+  }
+}
+
+/**
+ * Call router.py --set-passthrough <model> to write the passthrough model
+ * as the default in openclaw.json and save state for auto-restore.
+ */
+export async function setPassthrough(
+  passthroughModel: string,
+  pluginDir: string,
+  logger: PluginLogger,
+): Promise<RouterRecommendation | null> {
+  const routerPath = join(pluginDir, 'scripts', 'router.py');
+  const configPath = join(pluginDir, 'config.json');
+
+  if (!existsSync(routerPath)) {
+    logger.error(`[openmark-router] router.py not found at ${routerPath}`);
+    return null;
+  }
+
+  try {
+    const stdout = await execPython(
+      [routerPath, '--set-passthrough', passthroughModel, '--config', configPath],
+      logger,
+    );
+
+    return JSON.parse(stdout) as RouterRecommendation;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[openmark-router] router.py --set-passthrough failed: ${msg}`);
+    return null;
+  }
+}
+
+/**
+ * Call router.py --restore to restore the previous model after routing.
+ */
+export async function restore(
+  pluginDir: string,
+  logger: PluginLogger,
+): Promise<RouterRecommendation | null> {
+  const routerPath = join(pluginDir, 'scripts', 'router.py');
+
+  if (!existsSync(routerPath)) {
+    logger.error(`[openmark-router] router.py not found at ${routerPath}`);
+    return null;
+  }
+
+  try {
+    const stdout = await execPython(
+      [routerPath, '--restore'],
+      logger,
+    );
+
+    return JSON.parse(stdout) as RouterRecommendation;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[openmark-router] router.py --restore failed: ${msg}`);
     return null;
   }
 }

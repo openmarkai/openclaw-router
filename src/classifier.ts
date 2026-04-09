@@ -1,25 +1,30 @@
-import { request as httpsRequest } from 'node:https';
+import { request as httpRequest } from 'node:http';
 import type {
   PluginLogger,
   PluginConfig,
   ClassifierResult,
   CategoryInfo,
 } from './types';
-import { PROVIDER_ENDPOINTS } from './types';
-import { readProviderApiKey } from './provider-inject';
 import { getCategories } from './router-bridge';
+import { getUserOriginalModel } from './provider-inject';
 
 let cachedCategories: CategoryInfo[] | null = null;
 let categoryCacheTime = 0;
 const CATEGORY_CACHE_TTL_MS = 300_000; // 5 minutes
 
 /**
- * Classify the user's message into a benchmark category using an isolated
- * LLM call. The classifier uses minimal tokens (~400 input, ~5 output) and
- * has no access to OpenClaw's system prompt or conversation history.
+ * Classify the user's message into a benchmark category.
+ *
+ * Uses the OpenClaw gateway loopback (http://127.0.0.1:<gateway_port>) so
+ * that OpenClaw handles auth and format normalization. The plugin never
+ * touches API keys.
+ *
+ * Fallback chain if gateway is unreachable:
+ *   1. Gateway loopback (primary)
+ *   2. Skip classification → treat as no-match (passthrough)
  *
  * Returns null category if no match, classification fails, or message is
- * a greeting/follow-up.
+ * too short / a greeting.
  */
 export async function classify(
   userMessage: string | null,
@@ -38,23 +43,6 @@ export async function classify(
     logger.debug('[openmark-router] No categories available for classification');
     return noMatch;
   }
-
-  const classifierModel = config.classifier_model;
-  const providerName = classifierModel.split('/')[0];
-  const apiKey = readProviderApiKey(providerName);
-
-  if (!apiKey) {
-    logger.warn(`[openmark-router] No API key for classifier provider "${providerName}", skipping classification`);
-    return noMatch;
-  }
-
-  const baseUrl = PROVIDER_ENDPOINTS[providerName];
-  if (!baseUrl) {
-    logger.warn(`[openmark-router] Unknown classifier provider: ${providerName}`);
-    return noMatch;
-  }
-
-  const modelSlug = classifierModel.split('/').slice(1).join('/');
 
   const categoryList = categories
     .map((c) => {
@@ -75,8 +63,21 @@ Rules:
 - Do not explain your reasoning
 - Do not add quotes or formatting`;
 
+  const classifierModel = config.classifier_model || getUserOriginalModel();
+  if (!classifierModel) {
+    logger.warn('[openmark-router] No classifier model available (no config override, no captured default)');
+    return noMatch;
+  }
+
   try {
-    const response = await callLLM(baseUrl, apiKey, providerName, modelSlug, systemPrompt, userMessage, logger);
+    const response = await callGateway(
+      config.gateway_port,
+      classifierModel,
+      systemPrompt,
+      userMessage,
+      logger,
+    );
+
     const cleaned = response.trim().toLowerCase().replace(/['"]/g, '');
 
     const matchedCategory = categories.find(
@@ -95,6 +96,7 @@ Rules:
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.warn(`[openmark-router] Classification failed: ${msg}`);
+    logger.warn('[openmark-router] Falling back to passthrough (no classification)');
     return noMatch;
   }
 }
@@ -113,20 +115,21 @@ async function loadCategories(
   return cachedCategories;
 }
 
-function callLLM(
-  baseUrl: string,
-  apiKey: string,
-  provider: string,
-  model: string,
+/**
+ * Call the OpenClaw gateway's local OpenAI-compatible endpoint for
+ * classification. Uses a specific model (not openmark/auto) to avoid
+ * recursion. OpenClaw handles auth and provider format normalization.
+ */
+function callGateway(
+  gatewayPort: number,
+  classifierModel: string,
   systemPrompt: string,
   userMessage: string,
   logger: PluginLogger,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const url = new URL(`${baseUrl}/chat/completions`);
-
     const body = JSON.stringify({
-      model,
+      model: classifierModel,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userMessage },
@@ -136,26 +139,24 @@ function callLLM(
       stream: false,
     });
 
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    };
-
-    if (provider === 'anthropic') {
-      headers['x-api-key'] = apiKey;
-      headers['anthropic-version'] = '2023-06-01';
-      delete headers['Authorization'];
-    }
-
-    const req = httpsRequest(
-      url,
-      { method: 'POST', headers, timeout: 10_000 },
+    const req = httpRequest(
+      {
+        hostname: '127.0.0.1',
+        port: gatewayPort,
+        path: '/v1/chat/completions',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+        timeout: 15_000,
+      },
       (res) => {
         let data = '';
         res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
         res.on('end', () => {
           if (!res.statusCode || res.statusCode >= 400) {
-            reject(new Error(`Classifier API ${res.statusCode}: ${data.slice(0, 300)}`));
+            reject(new Error(`Gateway returned ${res.statusCode}: ${data.slice(0, 300)}`));
             return;
           }
 
@@ -164,16 +165,18 @@ function callLLM(
             const content = parsed.choices?.[0]?.message?.content ?? '';
             resolve(content);
           } catch {
-            reject(new Error(`Failed to parse classifier response: ${data.slice(0, 300)}`));
+            reject(new Error(`Failed to parse gateway response: ${data.slice(0, 300)}`));
           }
         });
       },
     );
 
-    req.on('error', reject);
+    req.on('error', (err) => {
+      reject(new Error(`Gateway connection failed (port ${gatewayPort}): ${err.message}`));
+    });
     req.on('timeout', () => {
       req.destroy();
-      reject(new Error('Classifier request timed out'));
+      reject(new Error(`Gateway request timed out (port ${gatewayPort})`));
     });
 
     req.write(body);

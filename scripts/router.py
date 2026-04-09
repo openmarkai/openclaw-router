@@ -26,7 +26,7 @@ import json
 import subprocess
 import sys
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -800,8 +800,9 @@ def _apply_model_config(primary: str, fallbacks: list[str] | None = None) -> tup
         model["fallbacks"] = fallbacks
 
     meta = data.setdefault("meta", {})
-    meta["lastTouchedAt"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.") + \
-        f"{datetime.utcnow().microsecond // 1000:03d}Z"
+    now = datetime.now(timezone.utc)
+    meta["lastTouchedAt"] = now.strftime("%Y-%m-%dT%H:%M:%S.") + \
+        f"{now.microsecond // 1000:03d}Z"
 
     try:
         oc_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -932,6 +933,48 @@ def execute_recommend(category: str, config: dict, base_dir: str,
         "category": category,
         "strategy": strategy,
         "display_name": result.get("display_name"),
+    }
+
+
+def execute_set_passthrough(model: str, base_dir: str) -> dict:
+    """Set a specific model as default without routing.
+
+    Used by the hybrid architecture when classification yields no category
+    match.  Writes the passthrough model to openclaw.json and saves state
+    so that --restore can bring back openmark/auto.
+    """
+    previous = "openmark/auto"
+    oc_path = _find_openclaw_config()
+    if oc_path:
+        try:
+            data = json.loads(oc_path.read_text(encoding="utf-8"))
+            current = data.get("agents", {}).get("defaults", {}).get("model", {}).get("primary", "")
+            if current:
+                previous = current
+        except Exception:
+            pass
+
+    state = {
+        "routed_category": "__passthrough__",
+        "routed_model": model,
+        "previous_model": previous,
+        "fallbacks": [],
+        "routed_at": datetime.now().isoformat(),
+        "manual": False,
+    }
+    try:
+        _state_path(base_dir).write_text(json.dumps(state, indent=2))
+    except Exception:
+        pass
+
+    ok, err = _apply_model_config(model)
+    if not ok:
+        return {"status": "error", "message": f"Failed to set passthrough: {err}"}
+
+    return {
+        "status": "ok",
+        "model_set": model,
+        "message": f"Passthrough set to {model}. Send --restore to revert to openmark/auto.",
     }
 
 
@@ -1091,7 +1134,11 @@ def main():
     )
     parser.add_argument(
         "--recommend",
-        help="Recommend a model for a category (no model switch, no state save). Used by v7 plugin.",
+        help="Recommend a model for a category (no model switch, no state save).",
+    )
+    parser.add_argument(
+        "--set-passthrough",
+        help="Set a specific model as default without routing (for no-match passthrough). Saves state for --restore.",
     )
     parser.add_argument(
         "--lock", action="store_true",
@@ -1201,6 +1248,11 @@ def main():
             args.recommend, config, base_dir,
             strategy_override=args.strategy,
         )
+        print(json.dumps(result, indent=2))
+        sys.exit(0 if result.get("status") == "ok" else 1)
+
+    if args.set_passthrough:
+        result = execute_set_passthrough(args.set_passthrough, base_dir)
         print(json.dumps(result, indent=2))
         sys.exit(0 if result.get("status") == "ok" else 1)
 

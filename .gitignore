@@ -14,6 +14,7 @@ dist/
 # Runtime state
 .providers_cache.json
 .routing_state.json
+.user_default_model
 categories.json
 
 # User benchmark data (examples/ is tracked for format reference)

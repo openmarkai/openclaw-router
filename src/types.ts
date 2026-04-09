@@ -11,7 +11,9 @@ export interface PluginConfig {
   classifier_model: string;
   no_route_passthrough: string;
   port: number;
+  gateway_port: number;
   show_routing_card: boolean;
+  restore_delay_s: number;
 }
 
 export interface PluginApi {
@@ -19,6 +21,7 @@ export interface PluginApi {
   pluginConfig: Record<string, unknown>;
   registerProvider: (opts: ProviderRegistration) => void;
   registerService: (opts: ServiceRegistration) => void;
+  on: (event: string, handler: (event: any) => Promise<void> | void, opts?: { priority?: number }) => void;
   config?: any;
   runtime?: {
     modelAuth?: {
@@ -72,6 +75,7 @@ export interface OpenClawConfig {
     defaults?: {
       model?: {
         primary?: string;
+        fallbacks?: string[];
       };
       models?: Record<string, unknown> | string[];
     };
@@ -94,6 +98,7 @@ export interface RouterRecommendation {
   fallbacks?: string[];
   display_name?: string;
   strategy?: string;
+  model_set?: string;
   primary?: {
     model: string;
     provider: string;
@@ -103,21 +108,6 @@ export interface RouterRecommendation {
     [key: string]: unknown;
   };
   message?: string;
-}
-
-export interface ChatCompletionRequest {
-  model: string;
-  messages: ChatMessage[];
-  stream?: boolean;
-  temperature?: number;
-  max_tokens?: number;
-  [key: string]: unknown;
-}
-
-export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string | null;
-  [key: string]: unknown;
 }
 
 export interface ClassifierResult {
@@ -131,16 +121,3 @@ export interface CategoryInfo {
   display_name: string | null;
   description: string | null;
 }
-
-/** Provider API endpoints for direct forwarding */
-export const PROVIDER_ENDPOINTS: Record<string, string> = {
-  openai: 'https://api.openai.com/v1',
-  anthropic: 'https://api.anthropic.com/v1',
-  google: 'https://generativelanguage.googleapis.com/v1beta/openai',
-  deepseek: 'https://api.deepseek.com/v1',
-  mistral: 'https://api.mistral.ai/v1',
-  together: 'https://api.together.xyz/v1',
-  xai: 'https://api.x.ai/v1',
-  groq: 'https://api.groq.com/openai/v1',
-  openrouter: 'https://openrouter.ai/api/v1',
-};

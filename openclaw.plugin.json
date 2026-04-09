@@ -8,23 +8,33 @@
     "properties": {
       "classifier_model": {
         "type": "string",
-        "description": "Model used for the isolated classification call (e.g. google/gemini-3.1-flash-lite-preview)",
-        "default": "google/gemini-3.1-flash-lite-preview"
+        "description": "Override: model for classification calls. Leave empty to use your default model.",
+        "default": ""
       },
       "no_route_passthrough": {
         "type": "string",
-        "description": "Model to use when no benchmark category matches (greetings, follow-ups, etc.)",
-        "default": "google/gemini-3-flash-preview"
+        "description": "Override: model for unrouted messages. Leave empty to use your default model.",
+        "default": ""
       },
       "port": {
         "type": "number",
         "description": "Port for the embedded routing server",
         "default": 2098
       },
+      "gateway_port": {
+        "type": "number",
+        "description": "Port of the OpenClaw gateway (used for classification loopback). Default is 18789.",
+        "default": 18789
+      },
       "show_routing_card": {
         "type": "boolean",
         "description": "Prepend routing card to responses when a task is routed",
         "default": true
+      },
+      "restore_delay_s": {
+        "type": "number",
+        "description": "Seconds before auto-restoring openmark/auto as default model after routing",
+        "default": 120
       }
     },
     "additionalProperties": false
