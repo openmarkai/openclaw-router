@@ -1,6 +1,7 @@
 import { dirname } from 'node:path';
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
 import type {
   PluginApi,
   PluginConfig,
@@ -10,12 +11,13 @@ import type {
 } from './types';
 import {
   clearMainConversationSessionBindings,
+  clearSpecificSessionBinding,
   getUserOriginalModel,
   injectProviderConfig,
   updateRuntimeModelConfig,
 } from './provider-inject';
-import { startServer } from './server';
-import { getCategories, restore } from './router-bridge';
+import { classifyMessage, isRoutingBypassCommand, shouldBypassAutomaticRouting, startServer } from './server';
+import { getCategories, previewRouteCategory, restore } from './router-bridge';
 
 const AUTO_MODEL: ProviderModelEntry = {
   id: 'auto',
@@ -36,7 +38,13 @@ const RETRY_PROMPT_MARKERS = [
   'the previous model attempt failed or timed out',
 ];
 const INTERNAL_SESSION_MARKERS = ['slug-generator', CLASSIFIER_SESSION_MARKER, CLASSIFIER_PROMPT_MARKER];
+const BEFORE_DISPATCH_DEDUPE_TTL_MS = 30_000;
 let loggedResolveEventShape = false;
+let _replyRuntimeBridge: any | null | undefined = undefined;
+const recentBeforeDispatchReplies = new Map<string, number>();
+const pendingCliRouteCards = new Map<string, string>();
+const pendingCliRouteRestores = new Set<string>();
+const activeCliRoutedRuns = new Set<string>();
 
 function resolveConfigObject(raw: Record<string, unknown> | undefined): Record<string, unknown> {
   return (
@@ -110,6 +118,31 @@ function resolvePluginDir(): string {
   }
 }
 
+function resolveReplyRuntimeBridge(): any | null {
+  if (_replyRuntimeBridge !== undefined) {
+    return _replyRuntimeBridge;
+  }
+
+  const probeSpecifiers = [
+    process.argv[1],
+    require.main?.filename,
+    __filename,
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0);
+
+  for (const specifier of probeSpecifiers) {
+    try {
+      const runtimeRequire = createRequire(specifier);
+      _replyRuntimeBridge = runtimeRequire('openclaw/plugin-sdk/reply-runtime');
+      return _replyRuntimeBridge;
+    } catch {
+      // Try the next host entrypoint.
+    }
+  }
+
+  _replyRuntimeBridge = null;
+  return null;
+}
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const plugin = {
   id: 'openmark-router',
@@ -144,6 +177,8 @@ const plugin = {
 
     injectProviderConfig(api, `http://127.0.0.1:${config.port}/v1`, config.port, logger, pluginDir);
 
+    registerBeforeDispatchHook(api, config, pluginDir, logger);
+    registerCliRoutingHooks(api, config, pluginDir, logger);
     registerRestoreHook(api, config, pluginDir, logger);
 
     const routerPy = join(pluginDir, 'scripts', 'router.py');
@@ -276,6 +311,511 @@ function getConcreteClassifierOverride(config: PluginConfig): PluginHookBeforeMo
     providerOverride: provider,
     modelOverride: model,
   };
+}
+
+function cloneConfigWithModelOverride(
+  cfg: Record<string, unknown>,
+  primary: string,
+  fallbacks: string[],
+): Record<string, unknown> {
+  const cloned = JSON.parse(JSON.stringify(cfg ?? {})) as Record<string, unknown>;
+  if (!cloned.agents || typeof cloned.agents !== 'object') cloned.agents = {};
+  const agents = cloned.agents as Record<string, unknown>;
+  if (!agents.defaults || typeof agents.defaults !== 'object') agents.defaults = {};
+  const defaults = agents.defaults as Record<string, unknown>;
+  if (!defaults.model || typeof defaults.model !== 'object') defaults.model = {};
+  const model = defaults.model as Record<string, unknown>;
+  model.primary = primary;
+  model.fallbacks = fallbacks;
+  return cloned;
+}
+
+function buildConversationAddress(
+  channelId: string | undefined,
+  conversationId: string | undefined,
+  senderId: string | undefined,
+): string | undefined {
+  const channel = channelId?.trim();
+  const target = conversationId?.trim() || senderId?.trim();
+  if (!channel || !target) {
+    return undefined;
+  }
+  return `${channel}:${target}`;
+}
+
+function buildBeforeDispatchContext(event: any, ctx: any): Record<string, unknown> {
+  const channelId = typeof ctx?.channelId === 'string'
+    ? ctx.channelId
+    : typeof event?.channel === 'string'
+      ? event.channel
+      : 'unknown';
+  const senderId = typeof event?.senderId === 'string'
+    ? event.senderId
+    : typeof ctx?.senderId === 'string'
+      ? ctx.senderId
+      : undefined;
+  const destination = buildConversationAddress(channelId, ctx?.conversationId, senderId);
+  const body = typeof event?.body === 'string' && event.body.trim()
+    ? event.body.trim()
+    : typeof event?.content === 'string'
+      ? event.content.trim()
+      : '';
+
+  return {
+    Body: body,
+    BodyForAgent: body,
+    RawBody: body,
+    CommandBody: body,
+    BodyForCommands: body,
+    From: destination,
+    To: destination,
+    SessionKey: typeof ctx?.sessionKey === 'string' ? ctx.sessionKey : undefined,
+    AccountId: typeof ctx?.accountId === 'string' ? ctx.accountId : undefined,
+    SenderId: senderId,
+    Timestamp: typeof event?.timestamp === 'number' ? event.timestamp : undefined,
+    Provider: channelId,
+    Surface: channelId,
+    OriginatingChannel: channelId,
+    OriginatingTo: destination,
+    ChatType: event?.isGroup ? 'group' : 'direct',
+    CommandAuthorized: false,
+  };
+}
+
+function replyPayloadsToText(reply: unknown): string {
+  const payloads = Array.isArray(reply) ? reply : [reply];
+  return payloads
+    .filter((payload): payload is Record<string, unknown> => typeof payload === 'object' && payload !== null)
+    .filter(payload => payload.isReasoning !== true && payload.isCompactionNotice !== true)
+    .map(payload => typeof payload.text === 'string' ? payload.text.trim() : '')
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+function normalizeFallbackModels(fallbacks: unknown): string[] {
+  if (!Array.isArray(fallbacks)) {
+    return [];
+  }
+  return fallbacks
+    .map(item => {
+      if (typeof item === 'string') return item.trim();
+      if (item && typeof item === 'object' && typeof (item as Record<string, unknown>).model === 'string') {
+        return ((item as Record<string, unknown>).model as string).trim();
+      }
+      return '';
+    })
+    .filter(Boolean);
+}
+
+function extractCurrentModelDefaults(cfg: Record<string, unknown>): { primary: string; fallbacks: string[] } {
+  const primary = typeof (cfg.agents as any)?.defaults?.model?.primary === 'string'
+    ? ((cfg.agents as any).defaults.model.primary as string)
+    : AUTO_MODEL_KEY;
+  const fallbacks = Array.isArray((cfg.agents as any)?.defaults?.model?.fallbacks)
+    ? ((cfg.agents as any).defaults.model.fallbacks as unknown[])
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map(item => item.trim())
+    : [];
+  return { primary, fallbacks };
+}
+
+function getCliRouteStateKey(ctx: any): string | null {
+  const candidates = [
+    ctx?.sessionKey,
+    ctx?.sessionId,
+    ctx?.runId,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return null;
+}
+
+function isDirectCliRoutingContext(ctx: any, prompt: string): boolean {
+  if (!prompt || shouldBypassAutomaticRouting(prompt)) {
+    return false;
+  }
+  const sessionKey = typeof ctx?.sessionKey === 'string' ? ctx.sessionKey.trim() : '';
+  const sessionId = typeof ctx?.sessionId === 'string' ? ctx.sessionId.trim() : '';
+  if ((sessionKey && sessionKey.startsWith('temp:')) || (sessionId && sessionId.startsWith('temp:'))) {
+    return false;
+  }
+  if (typeof ctx?.trigger === 'string' && ctx.trigger !== 'user') {
+    return false;
+  }
+
+  const customSession = [sessionKey, sessionId].some(
+    value => value.length > 0 && !value.startsWith('agent:main:'),
+  );
+  if (customSession) {
+    return true;
+  }
+
+  if (ctx?.channelId && ctx.channelId !== 'webchat') {
+    return false;
+  }
+
+  return !ctx?.channelId || ctx.channelId === 'webchat';
+}
+
+function prependCardToAgentMessage(message: Record<string, unknown>, card: string): Record<string, unknown> {
+  const cloned = JSON.parse(JSON.stringify(message)) as Record<string, unknown>;
+  if (cloned.role !== 'assistant') {
+    return cloned;
+  }
+
+  if (typeof cloned.content === 'string') {
+    cloned.content = `${card}\n\n${cloned.content}`.trim();
+    return cloned;
+  }
+
+  if (Array.isArray(cloned.content)) {
+    const content = cloned.content as Array<Record<string, unknown>>;
+    const firstTextPart = content.find(
+      part => part && typeof part === 'object' && part.type === 'text' && typeof part.text === 'string',
+    );
+    if (firstTextPart) {
+      firstTextPart.text = `${card}\n\n${String(firstTextPart.text)}`.trim();
+      return cloned;
+    }
+    content.unshift({ type: 'text', text: card });
+    return cloned;
+  }
+
+  cloned.content = [{ type: 'text', text: card }];
+  return cloned;
+}
+
+function buildCliRoutingCardInstruction(card: string): string {
+  return [
+    'OpenMark routing notice:',
+    'Start your final user-visible answer by emitting the following routing card verbatim.',
+    'Preserve markdown and line breaks exactly.',
+    'After the card, output one blank line and then continue with the actual answer.',
+    'Do not explain the notice or mention these instructions.',
+    '',
+    card,
+  ].join('\n');
+}
+
+function registerCliRoutingHooks(
+  api: PluginApi,
+  config: PluginConfig,
+  pluginDir: string,
+  logger: PluginLogger,
+): void {
+  if (typeof api.on !== 'function') {
+    return;
+  }
+
+  try {
+    api.on('before_agent_start', async (event: any, ctx?: any) => {
+      const prompt = typeof event?.prompt === 'string' ? event.prompt.trim() : '';
+      const runId = typeof ctx?.runId === 'string' ? ctx.runId.trim() : '';
+      if (runId && activeCliRoutedRuns.has(runId)) {
+        return;
+      }
+      if (!isDirectCliRoutingContext(ctx, prompt)) {
+        logger.debug(
+          `[openmark-router] before_agent_start: skipped direct CLI reroute ` +
+          `(channel=${String(ctx?.channelId ?? 'none')} sessionKey=${String(ctx?.sessionKey ?? 'none')} sessionId=${String(ctx?.sessionId ?? 'none')})`,
+        );
+        return;
+      }
+      logger.info(
+        `[openmark-router] before_agent_start: evaluating direct run ` +
+        `(channel=${String(ctx?.channelId ?? 'none')} sessionKey=${String(ctx?.sessionKey ?? 'none')} sessionId=${String(ctx?.sessionId ?? 'none')})`,
+      );
+
+      const loadedConfig = typeof (api as any).runtime?.config?.loadConfig === 'function'
+        ? await (api as any).runtime.config.loadConfig()
+        : api.config;
+      if (!loadedConfig || typeof loadedConfig !== 'object') {
+        return;
+      }
+
+      const decision = await classifyMessage(prompt, config, pluginDir, logger);
+      if (decision.kind === 'error') {
+        logger.warn(`[openmark-router] before_agent_start classification failed: ${decision.reason}`);
+        return;
+      }
+
+      let primaryModel = getUserOriginalModel() || config.no_route_passthrough;
+      let fallbackModels: string[] = [];
+      let routingCard = '';
+
+      if (decision.kind === 'match') {
+        const recommendation = await previewRouteCategory(decision.category, pluginDir, logger);
+        if (!recommendation || recommendation.status !== 'ok') {
+          logger.warn('[openmark-router] before_agent_start route preview failed');
+          return;
+        }
+        primaryModel = typeof recommendation.model === 'string'
+          ? recommendation.model
+          : typeof recommendation.model_set === 'string'
+            ? recommendation.model_set
+            : primaryModel;
+        fallbackModels = normalizeFallbackModels(recommendation.fallbacks);
+        routingCard = config.show_routing_card && typeof recommendation.card === 'string'
+          ? recommendation.card.trim()
+          : '';
+        logger.info(`[openmark-router] before_agent_start routed current CLI turn to ${primaryModel}`);
+      } else {
+        logger.info(`[openmark-router] before_agent_start no route match — using ${primaryModel}`);
+      }
+
+      if (!primaryModel || primaryModel.toLowerCase() === AUTO_MODEL_KEY) {
+        return;
+      }
+
+      updateRuntimeModelConfig(api, primaryModel, fallbackModels, logger);
+      const routeKey = getCliRouteStateKey(ctx);
+      if (runId) {
+        activeCliRoutedRuns.add(runId);
+      }
+      if (routeKey) {
+        pendingCliRouteRestores.add(routeKey);
+        if (routingCard) {
+          pendingCliRouteCards.set(routeKey, routingCard);
+        } else {
+          pendingCliRouteCards.delete(routeKey);
+        }
+      }
+
+      const { provider, model } = splitModelId(primaryModel);
+      const cliRoutingInstruction = routingCard ? buildCliRoutingCardInstruction(routingCard) : undefined;
+      return {
+        providerOverride: provider,
+        modelOverride: model,
+        appendSystemContext: cliRoutingInstruction,
+      };
+    }, { priority: 70 });
+
+    api.on('before_message_write', (event: any, ctx?: any) => {
+      const routeKey = getCliRouteStateKey(ctx);
+      if (!routeKey) {
+        return;
+      }
+      const card = pendingCliRouteCards.get(routeKey);
+      if (!card || !event?.message || typeof event.message !== 'object') {
+        return;
+      }
+
+      const message = event.message as Record<string, unknown>;
+      if (message.role !== 'assistant') {
+        return;
+      }
+
+      pendingCliRouteCards.delete(routeKey);
+      return {
+        message: prependCardToAgentMessage(message, card),
+      };
+    }, { priority: 70 });
+
+    api.on('agent_end', async (_event: any, ctx?: any) => {
+      const routeKey = getCliRouteStateKey(ctx);
+      if (typeof ctx?.runId === 'string' && ctx.runId.trim()) {
+        activeCliRoutedRuns.delete(ctx.runId.trim());
+      }
+      if (!routeKey || !pendingCliRouteRestores.has(routeKey)) {
+        return;
+      }
+
+      pendingCliRouteRestores.delete(routeKey);
+      pendingCliRouteCards.delete(routeKey);
+      updateRuntimeModelConfig(api, AUTO_MODEL_KEY, [], logger);
+      if (typeof ctx?.sessionKey === 'string' && ctx.sessionKey.trim()) {
+        clearSpecificSessionBinding(ctx.sessionKey.trim(), logger, 'cli-restore');
+      }
+      logger.info('[openmark-router] Restored CLI runtime default model to openmark/auto after routed turn');
+    }, { priority: 70 });
+
+    logger.info('[openmark-router] Registered CLI routing hooks for direct same-turn handoff');
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn(`[openmark-router] CLI routing hook registration failed: ${msg}`);
+  }
+}
+
+function buildBeforeDispatchDedupeKey(event: any, ctx: any, body: string): string | null {
+  const sessionKey = typeof ctx?.sessionKey === 'string' ? ctx.sessionKey.trim() : '';
+  const channelId = typeof ctx?.channelId === 'string'
+    ? ctx.channelId.trim()
+    : typeof event?.channel === 'string'
+      ? event.channel.trim()
+      : '';
+  const senderId = typeof ctx?.senderId === 'string'
+    ? ctx.senderId.trim()
+    : typeof event?.senderId === 'string'
+      ? event.senderId.trim()
+      : '';
+  if (!body || (!sessionKey && !channelId)) {
+    return null;
+  }
+  return [sessionKey, channelId, senderId, body].filter(Boolean).join('|');
+}
+
+function wasRecentlyHandledBeforeDispatch(key: string | null): boolean {
+  if (!key) {
+    return false;
+  }
+  const now = Date.now();
+  for (const [entryKey, timestamp] of recentBeforeDispatchReplies.entries()) {
+    if (now - timestamp > BEFORE_DISPATCH_DEDUPE_TTL_MS) {
+      recentBeforeDispatchReplies.delete(entryKey);
+    }
+  }
+  const handledAt = recentBeforeDispatchReplies.get(key);
+  return typeof handledAt === 'number' && now - handledAt <= BEFORE_DISPATCH_DEDUPE_TTL_MS;
+}
+
+function rememberBeforeDispatchHandled(key: string | null): void {
+  if (!key) {
+    return;
+  }
+  recentBeforeDispatchReplies.set(key, Date.now());
+}
+
+function registerBeforeDispatchHook(
+  api: PluginApi,
+  config: PluginConfig,
+  pluginDir: string,
+  logger: PluginLogger,
+): void {
+  if (typeof api.on !== 'function') {
+    logger.warn('[openmark-router] api.on() not available — before_dispatch routing disabled');
+    return;
+  }
+
+  try {
+    api.on('before_dispatch', async (event: any, ctx?: any) => {
+      const body = typeof event?.body === 'string' && event.body.trim()
+        ? event.body.trim()
+        : typeof event?.content === 'string'
+          ? event.content.trim()
+          : '';
+
+      if (!body) {
+        return;
+      }
+
+      if (typeof ctx?.sessionKey === 'string' && ctx.sessionKey.startsWith('temp:')) {
+        return;
+      }
+
+      if (ctx?.channelId === 'openmark' || event?.channel === 'openmark') {
+        logger.debug('[openmark-router] before_dispatch: openmark provider traffic detected — skipping reroute');
+        return;
+      }
+
+      if (isRoutingBypassCommand(body)) {
+        logger.debug('[openmark-router] before_dispatch: slash command detected — leaving default flow untouched');
+        return;
+      }
+
+      if (shouldBypassAutomaticRouting(body) || body.length < 10) {
+        logger.debug('[openmark-router] before_dispatch: internal/system/short message detected — leaving default flow untouched');
+        return;
+      }
+
+      const dedupeKey = buildBeforeDispatchDedupeKey(event, ctx, body);
+      if (wasRecentlyHandledBeforeDispatch(dedupeKey)) {
+        logger.debug('[openmark-router] before_dispatch: suppressing duplicate handled reply');
+        return { handled: true, text: '' };
+      }
+
+      const replyRuntimeBridge = resolveReplyRuntimeBridge();
+      if (!replyRuntimeBridge?.getReplyFromConfig || !replyRuntimeBridge?.finalizeInboundContext) {
+        logger.warn('[openmark-router] before_dispatch: OpenClaw reply runtime unavailable');
+        return;
+      }
+
+      const runtime = (api as any).runtime;
+      const loadedConfig = typeof runtime?.config?.loadConfig === 'function'
+        ? await runtime.config.loadConfig()
+        : api.config;
+      if (!loadedConfig || typeof loadedConfig !== 'object') {
+        logger.warn('[openmark-router] before_dispatch: current OpenClaw config unavailable');
+        return { handled: true, text: 'Routing is temporarily unavailable. Please try again.' };
+      }
+
+      logger.info(`[openmark-router] before_dispatch: evaluating "${body.slice(0, 80)}..."`);
+
+      const decision = await classifyMessage(body, config, pluginDir, logger);
+      if (decision.kind === 'error') {
+        logger.warn(`[openmark-router] before_dispatch classification failed: ${decision.reason}`);
+        return { handled: true, text: 'Routing is temporarily unavailable. Please try again.' };
+      }
+
+      let primaryModel = getUserOriginalModel() || config.no_route_passthrough;
+      let fallbackModels: string[] = [];
+      let routingCard = '';
+
+      if (decision.kind === 'match') {
+        const recommendation = await previewRouteCategory(decision.category, pluginDir, logger);
+        if (!recommendation || recommendation.status !== 'ok') {
+          logger.warn('[openmark-router] before_dispatch route preview failed');
+          return { handled: true, text: 'Routing failed for this request. Please try again.' };
+        }
+
+        primaryModel = typeof recommendation.model === 'string'
+          ? recommendation.model
+          : typeof recommendation.model_set === 'string'
+            ? recommendation.model_set
+            : primaryModel;
+        fallbackModels = normalizeFallbackModels(recommendation.fallbacks);
+        routingCard = config.show_routing_card && typeof recommendation.card === 'string'
+          ? recommendation.card.trim()
+          : '';
+        logger.info(`[openmark-router] before_dispatch routed same turn to ${primaryModel}`);
+      } else {
+        logger.info(`[openmark-router] before_dispatch no route match — using ${primaryModel}`);
+      }
+
+      if (!primaryModel) {
+        logger.warn('[openmark-router] before_dispatch: no concrete model available for reply');
+        return { handled: true, text: 'Routing is temporarily unavailable. Please try again.' };
+      }
+
+      const configOverride = cloneConfigWithModelOverride(
+        loadedConfig as Record<string, unknown>,
+        primaryModel,
+        fallbackModels,
+      );
+      const dispatchContext = replyRuntimeBridge.finalizeInboundContext(buildBeforeDispatchContext(event, ctx));
+      const reply = await replyRuntimeBridge.getReplyFromConfig(
+        dispatchContext,
+        {
+          suppressTyping: true,
+          onModelSelected: (selected: { provider?: string; model?: string }) => {
+            logger.info(
+              `[openmark-router] before_dispatch reply selected ${selected.provider ?? 'unknown'}/${selected.model ?? 'unknown'}`,
+            );
+          },
+        },
+        configOverride,
+      );
+
+      const replyText = replyPayloadsToText(reply);
+      const finalText = [routingCard, replyText].filter(Boolean).join('\n\n').trim();
+
+      if (!finalText) {
+        logger.warn('[openmark-router] before_dispatch produced no reply text');
+        rememberBeforeDispatchHandled(dedupeKey);
+        return { handled: true, text: routingCard || 'No reply generated for this request.' };
+      }
+
+      rememberBeforeDispatchHandled(dedupeKey);
+      return { handled: true, text: finalText };
+    }, { priority: 60 });
+
+    logger.info('[openmark-router] Registered before_dispatch hook for same-turn routing handoff');
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn(`[openmark-router] before_dispatch hook registration failed: ${msg}`);
+  }
 }
 
 function isLikelyUserConversationResolve(summary: { joined: string }): boolean {

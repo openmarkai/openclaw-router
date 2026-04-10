@@ -27,8 +27,17 @@ export interface PluginApi {
       event: any,
       ctx?: any,
     ) =>
-      | Promise<PluginHookBeforeModelResolveResult | void>
+      | Promise<
+        | PluginHookBeforeModelResolveResult
+        | PluginHookBeforeDispatchResult
+        | PluginHookBeforeAgentStartResult
+        | PluginHookBeforeMessageWriteResult
+        | void
+      >
       | PluginHookBeforeModelResolveResult
+      | PluginHookBeforeDispatchResult
+      | PluginHookBeforeAgentStartResult
+      | PluginHookBeforeMessageWriteResult
       | void,
     opts?: { priority?: number },
   ) => void;
@@ -126,6 +135,25 @@ export interface PluginHookBeforeModelResolveResult {
   providerOverride?: string;
   block?: boolean;
   blockReason?: string;
+}
+
+export interface PluginHookBeforeDispatchResult {
+  handled: boolean;
+  text?: string;
+}
+
+export interface PluginHookBeforeAgentStartResult {
+  systemPrompt?: string;
+  prependContext?: string;
+  prependSystemContext?: string;
+  appendSystemContext?: string;
+  modelOverride?: string;
+  providerOverride?: string;
+}
+
+export interface PluginHookBeforeMessageWriteResult {
+  block?: boolean;
+  message?: Record<string, unknown>;
 }
 
 export interface ClassifierResult {

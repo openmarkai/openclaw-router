@@ -5,7 +5,7 @@ import type {
   PluginLogger,
   PluginConfig,
 } from './types';
-import { routeCategory, setPassthrough, restore, getCategories } from './router-bridge';
+import { previewRouteCategory, routeCategory, setPassthrough, restore, getCategories } from './router-bridge';
 import { clearMainConversationSessionBindings, getUserOriginalModel } from './provider-inject';
 
 let serverInstance: ReturnType<typeof createServer> | null = null;
@@ -22,10 +22,13 @@ const INTERNAL_PROMPT_MARKERS = [
   'the previous model attempt failed or timed out',
   'openmark_classifier_internal',
 ];
+const ROUTING_BYPASS_COMMAND_PATTERN = /^\/[a-z0-9_]+(?:@\w+)?(?:\s|$)/i;
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let _runtime: any = null;
 let _agentRuntimeBridge: any | null | undefined = undefined;
+let _replyRuntimeBridge: any | null | undefined = undefined;
+let loggedCompatibilityFallback = false;
 
 type ClassificationDecision =
   | { kind: 'match'; category: string }
@@ -111,7 +114,7 @@ async function handleRequest(
     return;
   }
 
-  if (isInternalSystemPrompt(userMessage)) {
+  if (shouldBypassAutomaticRouting(userMessage)) {
     logger.debug('[openmark-router] Internal OpenClaw prompt detected — bypassing without state change');
     sendTextResponse(res, '', Boolean(chatReq.stream));
     return;
@@ -120,9 +123,14 @@ async function handleRequest(
   if (userMessage.length < 10) {
     logger.debug('[openmark-router] Message too short for routing — treating as no-match');
     const passthroughModel = getUserOriginalModel() || config.no_route_passthrough;
+    logCompatibilityFallback(logger, 'short-message passthrough');
     await setPassthrough(passthroughModel, pluginDir, logger);
     scheduleRestore(config, pluginDir, logger);
-    sendTextResponse(res, `No routing match. Your next message will be handled by ${passthroughModel}.`, Boolean(chatReq.stream));
+    sendTextResponse(
+      res,
+      `No routing match. Compatibility fallback activated; your next message will be handled by ${passthroughModel}.`,
+      Boolean(chatReq.stream),
+    );
     return;
   }
 
@@ -130,16 +138,27 @@ async function handleRequest(
 
   if (decision.kind === 'match') {
     logger.info(`[openmark-router] Classified as: ${decision.category}`);
-    const rec = await routeCategory(decision.category, pluginDir, logger);
+    const rec = await previewRouteCategory(decision.category, pluginDir, logger);
 
     if (rec && rec.status === 'ok' && rec.card) {
-      logger.info(`[openmark-router] Routed to: ${rec.model_set ?? rec.model}`);
-      scheduleRestore(config, pluginDir, logger);
-
       const card = config.show_routing_card ? rec.card : '';
-      const responseText = card || `Routed to ${rec.model_set ?? rec.model}. Send your message again.`;
-      sendTextResponse(res, responseText, Boolean(chatReq.stream));
-      return;
+      const primaryModel = typeof rec.model === 'string'
+        ? rec.model
+        : typeof rec.model_set === 'string'
+          ? rec.model_set
+          : '';
+      const fallbackModels = normalizeFallbackModels(rec.fallbacks);
+      logger.info(`[openmark-router] Preview-routed to: ${primaryModel}`);
+
+      logCompatibilityFallback(logger, `route match for ${decision.category}`);
+      const persistedRoute = await routeCategory(decision.category, pluginDir, logger);
+      if (persistedRoute && persistedRoute.status === 'ok') {
+        logger.info(`[openmark-router] Routed to: ${persistedRoute.model_set ?? persistedRoute.model}`);
+        scheduleRestore(config, pluginDir, logger);
+        const responseText = card || `Routed to ${persistedRoute.model_set ?? persistedRoute.model}. Send your message again.`;
+        sendTextResponse(res, responseText, Boolean(chatReq.stream));
+        return;
+      }
     }
 
     logger.warn('[openmark-router] Routing command failed after successful classification');
@@ -148,19 +167,24 @@ async function handleRequest(
   }
 
   if (decision.kind === 'error') {
-    logger.warn(`[openmark-router] Classification failed without passthrough: ${decision.reason}`);
+    logger.warn(`[openmark-router] Classification failed: ${decision.reason}`);
     sendTextResponse(res, 'Routing is temporarily unavailable. Please send your message again.', Boolean(chatReq.stream));
     return;
   }
 
-  logger.info('[openmark-router] No classification match — setting passthrough');
   const passthroughModel = getUserOriginalModel() || config.no_route_passthrough;
+  logger.info('[openmark-router] No classification match — setting passthrough via compatibility fallback');
+  logCompatibilityFallback(logger, 'no-match passthrough');
   await setPassthrough(passthroughModel, pluginDir, logger);
   scheduleRestore(config, pluginDir, logger);
-  sendTextResponse(res, `No routing match. Your next message will be handled by ${passthroughModel}.`, Boolean(chatReq.stream));
+  sendTextResponse(
+    res,
+    `No routing match. Compatibility fallback activated; your next message will be handled by ${passthroughModel}.`,
+    Boolean(chatReq.stream),
+  );
 }
 
-async function classifyMessage(
+export async function classifyMessage(
   userMessage: string,
   config: PluginConfig,
   pluginDir: string,
@@ -183,7 +207,24 @@ async function classifyMessage(
   }
 
   if (hasSimpleCompletionRuntime()) {
-    return classifyViaSimpleCompletion(userMessage, categories, classifierModel, logger);
+    const simpleCompletionDecision = await classifyViaSimpleCompletion(
+      userMessage,
+      categories,
+      classifierModel,
+      logger,
+    );
+    if (simpleCompletionDecision.kind !== 'error') {
+      return simpleCompletionDecision;
+    }
+
+    if (_runtime?.subagent?.run) {
+      logger.warn(
+        `[openmark-router] Simple completion classifier failed (${simpleCompletionDecision.reason}); falling back to subagent`,
+      );
+      return classifyViaSubagent(userMessage, categories, classifierModel, logger);
+    }
+
+    return simpleCompletionDecision;
   }
 
   if (_runtime?.subagent?.run) {
@@ -221,6 +262,31 @@ function resolveAgentRuntimeBridge(): any | null {
   }
 
   _agentRuntimeBridge = null;
+  return null;
+}
+
+function resolveReplyRuntimeBridge(): any | null {
+  if (_replyRuntimeBridge !== undefined) {
+    return _replyRuntimeBridge;
+  }
+
+  const probeSpecifiers = [
+    process.argv[1],
+    require.main?.filename,
+    __filename,
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0);
+
+  for (const specifier of probeSpecifiers) {
+    try {
+      const runtimeRequire = createRequire(specifier);
+      _replyRuntimeBridge = runtimeRequire('openclaw/plugin-sdk/reply-runtime');
+      return _replyRuntimeBridge;
+    } catch {
+      // Try the next host entrypoint.
+    }
+  }
+
+  _replyRuntimeBridge = null;
   return null;
 }
 
@@ -281,7 +347,51 @@ function summarizeAssistantMessage(message: any): string {
     model: message.model,
     contentTypes,
     contentItems: content.length,
+    extractedTextPreview: extractClassifierText(message)?.slice(0, 80) ?? null,
   });
+}
+
+function extractClassifierText(message: any): string | null {
+  const fromContent = contentToText(message?.content);
+  if (fromContent && fromContent.trim()) {
+    return fromContent.trim();
+  }
+
+  const topLevelCandidates = [
+    message?.text,
+    message?.outputText,
+    message?.contentText,
+  ];
+  for (const candidate of topLevelCandidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+
+  if (Array.isArray(message?.content)) {
+    for (const part of message.content) {
+      if (!part || typeof part !== 'object') continue;
+      const record = part as Record<string, unknown>;
+      const nestedCandidates = [record.text, record.value, record.content];
+      for (const candidate of nestedCandidates) {
+        if (typeof candidate === 'string' && candidate.trim()) {
+          return candidate.trim();
+        }
+        if (
+          candidate &&
+          typeof candidate === 'object' &&
+          typeof (candidate as Record<string, unknown>).value === 'string'
+        ) {
+          const nestedValue = ((candidate as Record<string, unknown>).value as string).trim();
+          if (nestedValue) {
+            return nestedValue;
+          }
+        }
+      }
+    }
+  }
+
+  return null;
 }
 
 async function classifyViaSimpleCompletion(
@@ -341,12 +451,12 @@ async function classifyViaSimpleCompletion(
         },
         options: {
           temperature: 0,
-          maxTokens: 40,
+          maxTokens: 120,
           reasoning: 'minimal',
         },
       });
 
-      const assistantText = contentToText(assistantMsg?.content);
+      const assistantText = extractClassifierText(assistantMsg);
       if (assistantText) {
         return parseClassifierResponse(assistantText, categories, logger, 'Simple completion');
       }
@@ -426,6 +536,175 @@ async function loadCategories(
   return cachedCategories;
 }
 
+async function loadCurrentConfig(logger: PluginLogger): Promise<Record<string, unknown> | null> {
+  try {
+    if (typeof _runtime?.config?.loadConfig === 'function') {
+      const cfg = await _runtime.config.loadConfig();
+      return cfg && typeof cfg === 'object' ? cfg as Record<string, unknown> : null;
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn(`[openmark-router] Failed to load current OpenClaw config: ${msg}`);
+  }
+
+  return null;
+}
+
+function cloneConfigWithModelOverride(
+  cfg: Record<string, unknown>,
+  primary: string,
+  fallbacks: string[],
+): Record<string, unknown> {
+  const cloned = JSON.parse(JSON.stringify(cfg ?? {})) as Record<string, unknown>;
+  if (!cloned.agents || typeof cloned.agents !== 'object') cloned.agents = {};
+  const agents = cloned.agents as Record<string, unknown>;
+  if (!agents.defaults || typeof agents.defaults !== 'object') agents.defaults = {};
+  const defaults = agents.defaults as Record<string, unknown>;
+  if (!defaults.model || typeof defaults.model !== 'object') defaults.model = {};
+  const model = defaults.model as Record<string, unknown>;
+  model.primary = primary;
+  model.fallbacks = fallbacks;
+  return cloned;
+}
+
+function normalizeFallbackModels(fallbacks: unknown): string[] {
+  if (!Array.isArray(fallbacks)) {
+    return [];
+  }
+  return fallbacks
+    .map(item => typeof item === 'string' ? item.trim() : '')
+    .filter(Boolean);
+}
+
+function extractInboundHistory(
+  req: { messages?: Array<{ role: string; content?: string | null }> },
+): Array<{ sender: string; body: string }> | undefined {
+  if (!Array.isArray(req.messages) || req.messages.length === 0) {
+    return undefined;
+  }
+
+  let lastUserIndex = -1;
+  for (let i = req.messages.length - 1; i >= 0; i -= 1) {
+    if (req.messages[i]?.role === 'user' && contentToText(req.messages[i]?.content)) {
+      lastUserIndex = i;
+      break;
+    }
+  }
+
+  if (lastUserIndex <= 0) {
+    return undefined;
+  }
+
+  const history = req.messages
+    .slice(0, lastUserIndex)
+    .map(message => {
+      const body = contentToText(message?.content);
+      if (!body) return null;
+      if (message.role !== 'user' && message.role !== 'assistant') return null;
+      return {
+        sender: message.role,
+        body,
+      };
+    })
+    .filter((entry): entry is { sender: string; body: string } => entry !== null);
+
+  return history.length > 0 ? history : undefined;
+}
+
+function buildProviderReplyContext(
+  req: { messages?: Array<{ role: string; content?: string | null }> },
+  userMessage: string,
+): Record<string, unknown> {
+  const syntheticPeer = 'openmark-auto';
+  return {
+    Body: userMessage,
+    BodyForAgent: userMessage,
+    RawBody: userMessage,
+    CommandBody: userMessage,
+    BodyForCommands: userMessage,
+    InboundHistory: extractInboundHistory(req),
+    From: `webchat:${syntheticPeer}`,
+    To: `webchat:${syntheticPeer}`,
+    Provider: 'webchat',
+    Surface: 'webchat',
+    OriginatingChannel: 'webchat',
+    OriginatingTo: syntheticPeer,
+    ChatType: 'direct',
+    ConversationLabel: 'OpenMark Auto Router',
+    CommandAuthorized: false,
+  };
+}
+
+function replyPayloadsToText(reply: unknown): string {
+  const payloads = Array.isArray(reply) ? reply : [reply];
+  return payloads
+    .filter((payload): payload is Record<string, unknown> => typeof payload === 'object' && payload !== null)
+    .filter(payload => payload.isReasoning !== true && payload.isCompactionNotice !== true)
+    .map(payload => typeof payload.text === 'string' ? payload.text.trim() : '')
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+async function tryReplyViaReplyRuntime(
+  chatReq: { messages?: Array<{ role: string; content?: string | null }> },
+  loadedConfig: Record<string, unknown>,
+  primaryModel: string,
+  fallbackModels: string[],
+  logger: PluginLogger,
+): Promise<string | null> {
+  const replyRuntimeBridge = resolveReplyRuntimeBridge();
+  if (!replyRuntimeBridge?.getReplyFromConfig || !replyRuntimeBridge?.finalizeInboundContext) {
+    return null;
+  }
+
+  if (!primaryModel || isRouterAliasModel(primaryModel)) {
+    return null;
+  }
+
+  const userMessage = extractLastUserMessage(chatReq);
+  if (!userMessage) {
+    return null;
+  }
+
+  try {
+    const configOverride = cloneConfigWithModelOverride(loadedConfig, primaryModel, fallbackModels);
+    const finalizedContext = replyRuntimeBridge.finalizeInboundContext(
+      buildProviderReplyContext(chatReq, userMessage),
+    );
+    const reply = await replyRuntimeBridge.getReplyFromConfig(
+      finalizedContext,
+      {
+        suppressTyping: true,
+        onModelSelected: (selected: { provider?: string; model?: string }) => {
+          logger.info(
+            `[openmark-router] Reply-runtime selected ${selected.provider ?? 'unknown'}/${selected.model ?? 'unknown'}`,
+          );
+        },
+      },
+      configOverride,
+    );
+
+    const replyText = replyPayloadsToText(reply).trim();
+    if (!replyText) {
+      logger.warn('[openmark-router] Reply-runtime produced no reply text for provider request');
+      return null;
+    }
+    return replyText;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn(`[openmark-router] Reply-runtime seamless reply failed: ${msg}`);
+    return null;
+  }
+}
+
+function logCompatibilityFallback(logger: PluginLogger, reason: string): void {
+  if (!loggedCompatibilityFallback) {
+    loggedCompatibilityFallback = true;
+    logger.warn('[openmark-router] Falling back to compatibility mode: persisting route and returning card-only response');
+  }
+  logger.info(`[openmark-router] Compatibility fallback reason: ${reason}`);
+}
+
 function scheduleRestore(
   config: PluginConfig,
   pluginDir: string,
@@ -473,7 +752,17 @@ function sendTextResponse(res: ServerResponse, text: string, stream = false): vo
       message: { role: 'assistant', content: text },
       finish_reason: 'stop',
     }],
-    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    usage: {
+      input: 0,
+      output: text ? 1 : 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: text ? 1 : 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      prompt_tokens: 0,
+      completion_tokens: text ? 1 : 0,
+      total_tokens: text ? 1 : 0,
+    },
   };
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -518,30 +807,20 @@ function sendStreamingTextResponse(res: ServerResponse, text: string): void {
     };
     res.write(`data: ${JSON.stringify(contentChunk)}\n\n`);
   }
-
-  const stopChunk = {
-    id,
-    object: 'chat.completion.chunk',
-    created,
-    model,
-    choices: [{
-      index: 0,
-      delta: {},
-      finish_reason: 'stop',
-    }],
-    usage: {
-      prompt_tokens: 0,
-      completion_tokens: text ? 1 : 0,
-      total_tokens: text ? 1 : 0,
-    },
-  };
-  res.write(`data: ${JSON.stringify(stopChunk)}\n\n`);
   res.end('data: [DONE]\n\n');
 }
 
-function isInternalSystemPrompt(text: string): boolean {
+export function isInternalSystemPrompt(text: string): boolean {
   const normalized = text.toLowerCase();
   return INTERNAL_PROMPT_MARKERS.some(marker => normalized.includes(marker));
+}
+
+export function isRoutingBypassCommand(text: string): boolean {
+  return ROUTING_BYPASS_COMMAND_PATTERN.test(text.trim());
+}
+
+export function shouldBypassAutomaticRouting(text: string): boolean {
+  return isInternalSystemPrompt(text) || isRoutingBypassCommand(text);
 }
 
 function isRouterAliasModel(modelId: string): boolean {

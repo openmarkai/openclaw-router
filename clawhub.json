@@ -1,7 +1,7 @@
 {
   "name": "openmark-router",
   "displayName": "OpenMark AI Router",
-  "description": "Benchmark-driven model routing plugin for OpenClaw, powered by OpenMark AI (https://openmark.ai). Registers as a provider and routes tasks to optimal models using real evaluation data — accuracy, cost, latency, stability — not keyword heuristics or complexity tiers. An isolated LLM classifier selects the task category; deterministic code handles routing math, model forwarding, and routing card injection. The routed model genuinely answers. 5 routing strategies. Direct API providers and OpenRouter.",
+  "description": "Benchmark-driven model routing plugin for OpenClaw, powered by OpenMark AI (https://openmark.ai). Registers as a provider and routes tasks to optimal models using real evaluation data — accuracy, cost, latency, stability — not keyword heuristics or complexity tiers. An isolated LLM classifier selects the task category; deterministic code handles routing math, model forwarding, and routing card injection. Restart the OpenClaw gateway after install or update so the new plugin build loads. 5 routing strategies. Direct API providers and OpenRouter.",
   "version": "7.0.0",
   "author": "openmarkai",
   "homepage": "https://openmark.ai",

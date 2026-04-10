@@ -1330,7 +1330,7 @@ def main():
     elif args.list_categories:
         result = list_categories(config, base_dir)
     elif args.task:
-        result = route(args.task, config, base_dir)
+        result = execute_recommend(args.task, config, base_dir)
     else:
         parser.print_help()
         sys.exit(1)

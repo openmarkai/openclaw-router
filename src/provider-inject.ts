@@ -154,6 +154,36 @@ export function clearMainConversationSessionBindings(
   }
 }
 
+export function clearSpecificSessionBinding(
+  sessionKey: string,
+  logger: PluginLogger,
+  reason: 'cli-restore' | 'runtime-restore',
+): boolean {
+  if (!sessionKey || !existsSync(MAIN_SESSION_STORE)) {
+    return false;
+  }
+
+  try {
+    const store = loadJsonFile(MAIN_SESSION_STORE);
+    if (!isObjectRecord(store)) {
+      return false;
+    }
+
+    const entry = store[sessionKey];
+    if (!isObjectRecord(entry) || !clearSessionModelBinding(entry)) {
+      return false;
+    }
+
+    atomicWriteJson(MAIN_SESSION_STORE, store);
+    logger.info(`[openmark-router] Cleared session model binding for ${sessionKey} during ${reason}`);
+    return true;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn(`[openmark-router] Failed to clear session model binding for ${sessionKey} during ${reason}: ${msg}`);
+    return false;
+  }
+}
+
 function originalModelPath(pluginDir: string): string {
   return join(pluginDir, '.user_default_model');
 }

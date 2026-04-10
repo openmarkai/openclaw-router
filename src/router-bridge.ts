@@ -37,6 +37,38 @@ export async function routeCategory(
 }
 
 /**
+ * Call router.py --task <category> to compute the recommended model and
+ * routing card without mutating openclaw.json or writing routing state.
+ */
+export async function previewRouteCategory(
+  category: string,
+  pluginDir: string,
+  logger: PluginLogger,
+): Promise<RouterRecommendation | null> {
+  const routerPath = join(pluginDir, 'scripts', 'router.py');
+  const configPath = join(pluginDir, 'config.json');
+
+  if (!existsSync(routerPath)) {
+    logger.error(`[openmark-router] router.py not found at ${routerPath}`);
+    return null;
+  }
+
+  try {
+    const stdout = await execPython(
+      [routerPath, '--task', category, '--config', configPath],
+      logger,
+    );
+
+    const result = JSON.parse(stdout) as RouterRecommendation;
+    return result;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[openmark-router] router.py --task failed: ${msg}`);
+    return null;
+  }
+}
+
+/**
  * Call router.py --set-passthrough <model> to write the passthrough model
  * as the default in openclaw.json and save state for auto-restore.
  */
