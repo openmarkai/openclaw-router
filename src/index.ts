@@ -160,13 +160,13 @@ const plugin = {
     const config = parseConfig(api.pluginConfig, pluginDir, logger);
 
     logger.info('[openmark-router] Initializing v7 hybrid router');
-    logger.info(`[openmark-router] Plugin API methods: ${Object.keys(api).join(', ')}`);
+    logger.debug(`[openmark-router] Plugin API methods: ${Object.keys(api).join(', ')}`);
 
     const rt = (api as any).runtime;
     if (rt && typeof rt === 'object') {
-      logger.info(`[openmark-router] runtime keys: ${Object.keys(rt).join(', ')}`);
+      logger.debug(`[openmark-router] runtime keys: ${Object.keys(rt).join(', ')}`);
       if (rt.subagent && typeof rt.subagent === 'object') {
-        logger.info(`[openmark-router] runtime.subagent keys: ${Object.keys(rt.subagent).join(', ')}`);
+        logger.debug(`[openmark-router] runtime.subagent keys: ${Object.keys(rt.subagent).join(', ')}`);
       }
     }
     logger.info(`[openmark-router] Classifier: ${config.classifier_model || '(user default — resolved at runtime)'}`);
@@ -437,12 +437,17 @@ function isDirectCliRoutingContext(ctx: any, prompt: string): boolean {
   if (!prompt || shouldBypassAutomaticRouting(prompt)) {
     return false;
   }
+  const channelId = typeof ctx?.channelId === 'string' ? ctx.channelId.trim() : '';
   const sessionKey = typeof ctx?.sessionKey === 'string' ? ctx.sessionKey.trim() : '';
   const sessionId = typeof ctx?.sessionId === 'string' ? ctx.sessionId.trim() : '';
   if ((sessionKey && sessionKey.startsWith('temp:')) || (sessionId && sessionId.startsWith('temp:'))) {
     return false;
   }
   if (typeof ctx?.trigger === 'string' && ctx.trigger !== 'user') {
+    return false;
+  }
+
+  if (channelId && channelId !== 'webchat') {
     return false;
   }
 
@@ -453,11 +458,7 @@ function isDirectCliRoutingContext(ctx: any, prompt: string): boolean {
     return true;
   }
 
-  if (ctx?.channelId && ctx.channelId !== 'webchat') {
-    return false;
-  }
-
-  return !ctx?.channelId || ctx.channelId === 'webchat';
+  return !channelId || channelId === 'webchat';
 }
 
 function prependCardToAgentMessage(message: Record<string, unknown>, card: string): Record<string, unknown> {
@@ -536,17 +537,23 @@ function registerCliRoutingHooks(
         return;
       }
 
-      const decision = await classifyMessage(prompt, config, pluginDir, logger);
-      if (decision.kind === 'error') {
-        logger.warn(`[openmark-router] before_agent_start classification failed: ${decision.reason}`);
-        return;
-      }
-
       let primaryModel = getUserOriginalModel() || config.no_route_passthrough;
       let fallbackModels: string[] = [];
       let routingCard = '';
+      let decision: { kind: 'match' | 'none' | 'error'; category?: string; reason?: string };
 
-      if (decision.kind === 'match') {
+      if (prompt.length < 10) {
+        logger.info('[openmark-router] before_agent_start short message — using passthrough model without classification');
+        decision = { kind: 'none' };
+      } else {
+        decision = await classifyMessage(prompt, config, pluginDir, logger);
+        if (decision.kind === 'error') {
+          logger.warn(`[openmark-router] before_agent_start classification failed: ${decision.reason}`);
+          return;
+        }
+      }
+
+      if (decision.kind === 'match' && decision.category) {
         const recommendation = await previewRouteCategory(decision.category, pluginDir, logger);
         if (!recommendation || recommendation.status !== 'ok') {
           logger.warn('[openmark-router] before_agent_start route preview failed');
@@ -715,8 +722,8 @@ function registerBeforeDispatchHook(
         return;
       }
 
-      if (shouldBypassAutomaticRouting(body) || body.length < 10) {
-        logger.debug('[openmark-router] before_dispatch: internal/system/short message detected — leaving default flow untouched');
+      if (shouldBypassAutomaticRouting(body)) {
+        logger.debug('[openmark-router] before_dispatch: internal/system message detected — leaving default flow untouched');
         return;
       }
 
@@ -741,19 +748,25 @@ function registerBeforeDispatchHook(
         return { handled: true, text: 'Routing is temporarily unavailable. Please try again.' };
       }
 
-      logger.info(`[openmark-router] before_dispatch: evaluating "${body.slice(0, 80)}..."`);
-
-      const decision = await classifyMessage(body, config, pluginDir, logger);
-      if (decision.kind === 'error') {
-        logger.warn(`[openmark-router] before_dispatch classification failed: ${decision.reason}`);
-        return { handled: true, text: 'Routing is temporarily unavailable. Please try again.' };
-      }
-
       let primaryModel = getUserOriginalModel() || config.no_route_passthrough;
       let fallbackModels: string[] = [];
       let routingCard = '';
+      let decision: { kind: 'match' | 'none' | 'error'; category?: string; reason?: string };
 
-      if (decision.kind === 'match') {
+      logger.info(`[openmark-router] before_dispatch: evaluating "${body.slice(0, 80)}..."`);
+
+      if (body.length < 10) {
+        logger.info('[openmark-router] before_dispatch short message — using passthrough model without classification');
+        decision = { kind: 'none' };
+      } else {
+        decision = await classifyMessage(body, config, pluginDir, logger);
+        if (decision.kind === 'error') {
+          logger.warn(`[openmark-router] before_dispatch classification failed: ${decision.reason}`);
+          return { handled: true, text: 'Routing is temporarily unavailable. Please try again.' };
+        }
+      }
+
+      if (decision.kind === 'match' && decision.category) {
         const recommendation = await previewRouteCategory(decision.category, pluginDir, logger);
         if (!recommendation || recommendation.status !== 'ok') {
           logger.warn('[openmark-router] before_dispatch route preview failed');

@@ -1,20 +1,32 @@
 {
   "id": "openmark-router",
   "name": "OpenMark AI Router",
-  "description": "Benchmark-driven model routing. Routes tasks to optimal models using real evaluation data from OpenMark AI — accuracy, cost, latency, stability.",
+  "description": "Benchmark-driven model routing. Uses one isolated low-cost classification call, then lets the routed model produce the real reply on the same turn with benchmark-based model selection from OpenMark AI (https://openmark.ai). Captures your real default model for classifier/passthrough use and prefers direct provider keys before OpenRouter fallback when available.",
   "version": "7.0.0",
   "configSchema": {
     "type": "object",
     "properties": {
       "classifier_model": {
         "type": "string",
-        "description": "Override: model for classification calls. Leave empty to use your default model.",
+        "description": "Optional override for the isolated classification call. Small cheap models are recommended. Leave empty to use your captured default model.",
         "default": ""
       },
       "no_route_passthrough": {
         "type": "string",
-        "description": "Override: model for unrouted messages. Leave empty to use your default model.",
+        "description": "Optional override for unrouted messages and short-message passthrough. Leave empty to use your captured default model.",
         "default": ""
+      },
+      "routing_strategy": {
+        "type": "string",
+        "description": "Benchmark ranking strategy used to choose the routed model.",
+        "default": "balanced",
+        "enum": [
+          "balanced",
+          "best_score",
+          "best_cost_efficiency",
+          "best_under_budget",
+          "best_under_latency"
+        ]
       },
       "port": {
         "type": "number",
@@ -33,8 +45,29 @@
       },
       "restore_delay_s": {
         "type": "number",
-        "description": "Seconds before auto-restoring openmark/auto as default model after routing",
+        "description": "Seconds before timer-based restore returns the default model to openmark/auto when hook-based restore is unavailable.",
         "default": 30
+      },
+      "fallback_count": {
+        "type": "number",
+        "description": "How many ranked fallback models to include with the routed reply run.",
+        "default": 2
+      },
+      "cost_ceiling": {
+        "type": [
+          "number",
+          "null"
+        ],
+        "description": "Optional max cost per run used by the best_under_budget strategy.",
+        "default": null
+      },
+      "latency_ceiling_s": {
+        "type": [
+          "number",
+          "null"
+        ],
+        "description": "Optional max latency in seconds used by the best_under_latency strategy.",
+        "default": null
       }
     },
     "additionalProperties": false
