@@ -179,7 +179,7 @@ function resolveReplyRuntimeBridge(): any | null {
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const plugin = {
   id: 'openmark-router',
-  name: 'OpenMark AI Router',
+  name: 'OpenMark AI Model Router',
 
   register(api: PluginApi) {
     const logger: PluginLogger = api.logger || {
@@ -251,7 +251,7 @@ function registerProvider(api: PluginApi, config: PluginConfig, logger: PluginLo
   try {
     api.registerProvider({
       id: 'openmark',
-      label: 'OpenMark AI Router',
+      label: 'OpenMark AI Model Router',
       models: {
         baseUrl: `http://127.0.0.1:${config.port}/v1`,
         api: 'openai-completions',

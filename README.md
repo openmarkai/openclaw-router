@@ -1,4 +1,4 @@
-# OpenMark AI Router
+# OpenMark AI Model Router
 
 **Benchmark-driven model routing for [OpenClaw](https://github.com/openclaw/openclaw), powered by [OpenMark AI](https://openmark.ai).**
 

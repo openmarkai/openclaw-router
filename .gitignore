@@ -1,6 +1,7 @@
 # Internal ops/planning docs (not for public repo)
 PLAN.md
 archive/
+release/
 
 # Build output
 dist/
