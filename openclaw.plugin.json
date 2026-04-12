@@ -2,7 +2,7 @@
   "id": "openmark-router",
   "name": "OpenMark AI Router",
   "description": "Benchmark-driven model routing. Uses one isolated low-cost classification call, then lets the routed model produce the real reply on the same turn with benchmark-based model selection from OpenMark AI (https://openmark.ai). Captures your real default model for classifier/passthrough use, prefers direct provider keys before OpenRouter fallback when available, and includes a local dashboard for router health, providers, benchmark visibility, benchmark CSV import, category descriptions, and basic controls.",
-  "version": "7.0.0",
+  "version": "7.1.0",
   "configSchema": {
     "type": "object",
     "properties": {

@@ -2,7 +2,7 @@
   "name": "openmark-router",
   "displayName": "OpenMark AI Router",
   "description": "Benchmark-driven model routing plugin for OpenClaw, powered by OpenMark AI (https://openmark.ai). Registers as a provider, performs one isolated low-cost classification call, and lets the routed model produce the real reply on the same turn. The router captures your real default model for classifier/passthrough use, prefers direct provider keys first, and falls back to OpenRouter keys when benchmark rows include them and your OpenClaw setup has OpenRouter access. Includes a local dashboard for router health, detected providers, benchmark visibility, benchmark CSV import, category descriptions, and basic controls such as routing strategy and routing-card display. Provider filtering is best-effort and still depends on valid OpenClaw model ids. Prefer small cheap models for classification when you want the classifier cost to be negligible. Restart the OpenClaw gateway after install, update, or changing your real default model.",
-  "version": "7.0.0",
+  "version": "7.1.0",
   "author": "openmarkai",
   "homepage": "https://openmark.ai",
   "repository": "https://github.com/openmarkai/openclaw-router",

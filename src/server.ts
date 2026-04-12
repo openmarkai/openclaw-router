@@ -26,7 +26,7 @@ const INTERNAL_PROMPT_MARKERS = [
   'openmark_classifier_internal',
 ];
 const ROUTING_BYPASS_COMMAND_PATTERN = /^\/[a-z0-9_]+(?:@\w+)?(?:\s|$)/i;
-const PLUGIN_VERSION = '7.0.0';
+const PLUGIN_VERSION = '7.1.0';
 const ROUTING_STRATEGIES = new Set([
   'balanced',
   'best_score',
@@ -122,6 +122,13 @@ async function handleRequest(
 
   if (req.method === 'POST' && pathname === '/dashboard/api/import') {
     const result = await importBenchmarkCsv(req, config, pluginDir, logger);
+    res.writeHead(result.status === 'ok' ? 200 : 400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/dashboard/api/delete') {
+    const result = await deleteBenchmarkCsv(req, pluginDir, logger);
     res.writeHead(result.status === 'ok' ? 200 : 400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(result));
     return;
@@ -583,6 +590,7 @@ type DashboardCategory = {
   description: string | null;
   models: number;
   export_date: string | null;
+  filename: string | null;
 };
 
 function readRepoDashboardConfig(pluginDir: string, logger: PluginLogger): Record<string, unknown> {
@@ -838,6 +846,57 @@ async function importBenchmarkCsv(
     } catch {
       // ignore temporary cleanup failures
     }
+  }
+}
+
+async function deleteBenchmarkCsv(
+  req: IncomingMessage,
+  pluginDir: string,
+  logger: PluginLogger,
+): Promise<Record<string, unknown>> {
+  const body = await readBody(req);
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(body) as Record<string, unknown>;
+  } catch {
+    return { status: 'error', error: 'Invalid JSON payload' };
+  }
+
+  const requestedFilename = typeof payload.filename === 'string' ? payload.filename.trim() : '';
+  const categoryName = typeof payload.category === 'string' ? payload.category.trim() : '';
+  const safeFilename = requestedFilename.split(/[\\/]/).pop()?.trim() ?? '';
+
+  if (!safeFilename || safeFilename !== requestedFilename) {
+    return { status: 'error', error: 'A valid benchmark CSV filename is required' };
+  }
+  if (!safeFilename.toLowerCase().endsWith('.csv')) {
+    return { status: 'error', error: 'Only benchmark CSV files can be deleted' };
+  }
+
+  const repoConfig = readRepoDashboardConfig(pluginDir, logger);
+  const benchmarksDir = resolveBenchmarksDir(pluginDir, repoConfig);
+  const targetPath = join(benchmarksDir, safeFilename);
+
+  if (!existsSync(targetPath)) {
+    return { status: 'error', error: 'Benchmark CSV was not found' };
+  }
+
+  try {
+    unlinkSync(targetPath);
+    resetCategoryCache();
+    return {
+      status: 'ok',
+      message: categoryName
+        ? `Deleted benchmark "${categoryName}" and removed ${safeFilename}.`
+        : `Deleted benchmark CSV ${safeFilename}.`,
+      deleted_filename: safeFilename,
+      benchmarks_dir: typeof repoConfig.benchmarks_dir === 'string' ? repoConfig.benchmarks_dir : 'benchmarks',
+      benchmarks_path: benchmarksDir,
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[openmark-router] Benchmark CSV delete failed: ${msg}`);
+    return { status: 'error', error: 'Failed to delete benchmark CSV' };
   }
 }
 

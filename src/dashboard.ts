@@ -247,6 +247,17 @@ export function renderDashboardHtml(): string {
       border-color: var(--primary-hover);
     }
 
+    .btn-danger {
+      background-color: var(--error);
+      color: #ffffff;
+      border-color: var(--error);
+    }
+
+    .btn-danger:hover:not(:disabled) {
+      background-color: #b91c1c;
+      border-color: #b91c1c;
+    }
+
     .btn-ghost {
       border-color: var(--border-color);
       background: var(--bg-secondary);
@@ -787,6 +798,14 @@ export function renderDashboardHtml(): string {
       text-align: right;
     }
 
+    .table-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+
     .btn-linkish {
       border: 0;
       background: transparent;
@@ -802,6 +821,14 @@ export function renderDashboardHtml(): string {
       transform: none;
       box-shadow: none;
       color: var(--primary-hover);
+    }
+
+    .btn-linkish-danger {
+      color: var(--error);
+    }
+
+    .btn-linkish-danger:hover:not(:disabled) {
+      color: #b91c1c;
     }
 
     .modal-backdrop {
@@ -869,6 +896,15 @@ export function renderDashboardHtml(): string {
       overflow-y: auto;
       color: var(--text-primary);
       white-space: pre-wrap;
+    }
+
+    .modal-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 12px;
+      padding: 1rem 1.5rem 1.25rem;
+      border-top: 1px solid var(--border-color);
+      flex-wrap: wrap;
     }
 
     .footer {
@@ -1146,12 +1182,14 @@ export function renderDashboardHtml(): string {
                 <th>Display name</th>
                 <th>Models</th>
                 <th>Export date</th>
+                <th>Source CSV</th>
                 <th></th>
               </tr>
             </thead>
             <tbody id="categoriesTable"></tbody>
           </table>
           <div class="empty-state" id="categoriesEmpty" hidden>No benchmark categories detected yet.</div>
+          <div id="categoriesStatus" class="status"></div>
           <div class="footer">Served locally by the router on 127.0.0.1. This dashboard is intentionally lightweight and stays close to the plugin’s real runtime state.</div>
         </div>
       </section>
@@ -1169,10 +1207,28 @@ export function renderDashboardHtml(): string {
         <div class="modal-body" id="descriptionModalBody">-</div>
       </div>
     </div>
+
+    <div class="modal-backdrop" id="deleteModal" role="dialog" aria-modal="true" aria-labelledby="deleteModalTitle">
+      <div class="modal-content">
+        <div class="modal-header">
+          <div class="modal-title-wrap">
+            <h3 class="modal-title" id="deleteModalTitle">Delete benchmark</h3>
+            <p class="modal-subtitle mono" id="deleteModalSubtitle">-</p>
+          </div>
+          <button id="closeDeleteModal" type="button" class="btn btn-ghost">Close</button>
+        </div>
+        <div class="modal-body" id="deleteModalBody">-</div>
+        <div class="modal-footer">
+          <button id="cancelDeleteBtn" type="button" class="btn btn-ghost">Cancel</button>
+          <button id="confirmDeleteBtn" type="button" class="btn btn-danger">Delete CSV</button>
+        </div>
+      </div>
+    </div>
   </div>
   <script>
     const STORAGE_KEY = 'openmark-router-dashboard-theme';
     let currentCategories = [];
+    let pendingDeleteCategory = null;
     const els = {
       body: document.body,
       themeToggle: document.getElementById('themeToggle'),
@@ -1209,11 +1265,19 @@ export function renderDashboardHtml(): string {
       categoriesSubtitle: document.getElementById('categoriesSubtitle'),
       categoriesTable: document.getElementById('categoriesTable'),
       categoriesEmpty: document.getElementById('categoriesEmpty'),
+      categoriesStatus: document.getElementById('categoriesStatus'),
       descriptionModal: document.getElementById('descriptionModal'),
       closeDescriptionModal: document.getElementById('closeDescriptionModal'),
       descriptionModalTitle: document.getElementById('descriptionModalTitle'),
       descriptionModalSubtitle: document.getElementById('descriptionModalSubtitle'),
       descriptionModalBody: document.getElementById('descriptionModalBody'),
+      deleteModal: document.getElementById('deleteModal'),
+      closeDeleteModal: document.getElementById('closeDeleteModal'),
+      cancelDeleteBtn: document.getElementById('cancelDeleteBtn'),
+      confirmDeleteBtn: document.getElementById('confirmDeleteBtn'),
+      deleteModalTitle: document.getElementById('deleteModalTitle'),
+      deleteModalSubtitle: document.getElementById('deleteModalSubtitle'),
+      deleteModalBody: document.getElementById('deleteModalBody'),
       routingStrategy: document.getElementById('routingStrategy'),
       showRoutingCard: document.getElementById('showRoutingCard'),
       saveStatus: document.getElementById('saveStatus'),
@@ -1252,6 +1316,11 @@ export function renderDashboardHtml(): string {
     function setImportStatus(message, kind) {
       els.importStatus.textContent = message || '';
       els.importStatus.className = 'status' + (kind ? ' ' + kind : '');
+    }
+
+    function setCategoriesStatus(message, kind) {
+      els.categoriesStatus.textContent = message || '';
+      els.categoriesStatus.className = 'status' + (kind ? ' ' + kind : '');
     }
 
     function resolveInitialTheme() {
@@ -1308,7 +1377,11 @@ export function renderDashboardHtml(): string {
           '<td>' + escapeHtml(cat.display_name || '-') + '</td>' +
           '<td>' + escapeHtml(String(cat.models ?? '-')) + '</td>' +
           '<td class="mono">' + escapeHtml(cat.export_date || '-') + '</td>' +
-          '<td class="table-action"><button type="button" class="btn-linkish" data-category="' + escapeHtml(cat.name || '') + '">Description</button></td>' +
+          '<td class="mono">' + escapeHtml(cat.filename || '-') + '</td>' +
+          '<td class="table-action"><div class="table-actions">' +
+            '<button type="button" class="btn-linkish" data-action="describe" data-category="' + escapeHtml(cat.name || '') + '">Description</button>' +
+            '<button type="button" class="btn-linkish btn-linkish-danger" data-action="delete" data-filename="' + escapeHtml(cat.filename || '') + '">Delete</button>' +
+          '</div></td>' +
         '</tr>';
       }).join('');
     }
@@ -1328,6 +1401,28 @@ export function renderDashboardHtml(): string {
 
     function closeDescriptionModal() {
       els.descriptionModal.classList.remove('open');
+    }
+
+    function openDeleteModal(filename) {
+      const match = currentCategories.find(function(item) {
+        return item && item.filename === filename;
+      });
+      if (!match || !match.filename) {
+        return;
+      }
+      pendingDeleteCategory = match;
+      els.deleteModalTitle.textContent = 'Delete benchmark';
+      els.deleteModalSubtitle.textContent = match.filename;
+      els.deleteModalBody.textContent = 'This deletes the "' +
+        (match.display_name || match.name || 'benchmark') +
+        '" benchmark from the router and removes its CSV file from the local benchmarks directory. This cannot be undone from the dashboard.';
+      els.deleteModal.classList.add('open');
+    }
+
+    function closeDeleteModal() {
+      pendingDeleteCategory = null;
+      els.confirmDeleteBtn.disabled = false;
+      els.deleteModal.classList.remove('open');
     }
 
     function updateHero(state) {
@@ -1444,6 +1539,32 @@ export function renderDashboardHtml(): string {
       await loadState();
     }
 
+    async function deleteBenchmarkFile() {
+      if (!pendingDeleteCategory || !pendingDeleteCategory.filename) {
+        setCategoriesStatus('No benchmark selected for deletion.', 'warn');
+        return;
+      }
+      els.confirmDeleteBtn.disabled = true;
+      setCategoriesStatus('Deleting benchmark CSV...', '');
+      const response = await fetch('/dashboard/api/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          category: pendingDeleteCategory.name,
+          filename: pendingDeleteCategory.filename
+        })
+      });
+      const result = await response.json();
+      if (!response.ok || result.status !== 'ok') {
+        setCategoriesStatus(result.error || 'Failed to delete benchmark CSV.', 'error');
+        els.confirmDeleteBtn.disabled = false;
+        return;
+      }
+      closeDeleteModal();
+      setCategoriesStatus(result.message || 'Benchmark CSV deleted.', 'ok');
+      await loadState();
+    }
+
     async function saveSettings(event) {
       event.preventDefault();
       setStatus('Saving...', '');
@@ -1499,9 +1620,21 @@ export function renderDashboardHtml(): string {
       if (!target || !(target instanceof HTMLElement)) {
         return;
       }
-      const categoryName = target.getAttribute('data-category');
-      if (categoryName) {
+      const action = target.getAttribute('data-action');
+      if (action === 'describe') {
+        const categoryName = target.getAttribute('data-category');
+        if (!categoryName) {
+          return;
+        }
         openDescriptionModal(categoryName);
+        return;
+      }
+      if (action === 'delete') {
+        const filename = target.getAttribute('data-filename');
+        if (!filename) {
+          return;
+        }
+        openDeleteModal(filename);
       }
     });
     els.closeDescriptionModal.addEventListener('click', closeDescriptionModal);
@@ -1510,9 +1643,25 @@ export function renderDashboardHtml(): string {
         closeDescriptionModal();
       }
     });
+    els.closeDeleteModal.addEventListener('click', closeDeleteModal);
+    els.cancelDeleteBtn.addEventListener('click', closeDeleteModal);
+    els.confirmDeleteBtn.addEventListener('click', function() {
+      deleteBenchmarkFile().catch(function(err) {
+        setCategoriesStatus(err.message || 'Failed to delete benchmark CSV.', 'error');
+        els.confirmDeleteBtn.disabled = false;
+      });
+    });
+    els.deleteModal.addEventListener('click', function(event) {
+      if (event.target === els.deleteModal) {
+        closeDeleteModal();
+      }
+    });
     document.addEventListener('keydown', function(event) {
       if (event.key === 'Escape' && els.descriptionModal.classList.contains('open')) {
         closeDescriptionModal();
+      }
+      if (event.key === 'Escape' && els.deleteModal.classList.contains('open')) {
+        closeDeleteModal();
       }
     });
     els.refreshBtn.addEventListener('click', function() {

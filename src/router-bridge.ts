@@ -208,6 +208,7 @@ export async function describeCategories(
   description: string | null;
   models: number;
   export_date: string | null;
+  filename: string | null;
 }>> {
   const routerPath = join(pluginDir, 'scripts', 'router.py');
   const configPath = join(pluginDir, 'config.json');

@@ -483,6 +483,7 @@ def describe_categories(config: dict, base_dir: str) -> dict:
             "description": b.get("description"),
             "models": len(b["entries"]),
             "export_date": b["export_date"],
+            "filename": b.get("filename"),
         }
         categories.append(cat)
 
