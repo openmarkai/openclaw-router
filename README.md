@@ -4,7 +4,7 @@
 
 Use benchmark-driven routing instead of guessing, complexity heuristics, or manual model switching. The router uses one lightweight semantic classification call to identify the task category, then deterministically picks the best model and fallbacks from your OpenMark benchmark data and lets the routed model generate the real reply.
 
-## Normal Install (recommended)
+## Install (recommended)
 
 ```bash
 openclaw plugins install openmark-router
@@ -25,6 +25,16 @@ openclaw gateway restart
 
 ### After any install or update, restart the OpenClaw gateway so the newly built plugin files are loaded.
 If you change your real default model and want the router to use it for classification or passthrough, restart the gateway again so the plugin captures the new value.
+
+## Local Dashboard
+
+The router now ships with a small local dashboard on the same embedded server.
+
+- Open `http://127.0.0.1:2098/dashboard` by default, or use your configured `port`.
+- It currently shows router health, detected providers, benchmark categories/freshness, and a small config summary.
+- It lets you edit `routing_strategy` and `show_routing_card`.
+- It can import benchmark CSVs directly into the configured benchmark directory and includes guidance for exporting those CSVs from [OpenMark AI](https://openmark.ai).
+- It can surface benchmark category descriptions directly from the dashboard.
 
 ## 30-Second Example
 
@@ -66,7 +76,7 @@ The routed model genuinely answers. The classifier does not generate the final u
 3. **Place** the CSV in `~/.openclaw/workspace/plugins/openmark-router/benchmarks/`
 4. **Done** -- the router activates automatically
 
-Today, benchmark import is file-based. A dashboard import flow is planned for a future version.
+You can still place CSVs manually, but the local dashboard now also provides a CSV import flow with OpenMark export guidance.
 
 ## How It Works
 
@@ -160,6 +170,7 @@ The router provides ranked fallback models from the same benchmark. On the seaml
 Edit `config.json` in the plugin directory.
 
 `config.json` is the source of truth for routing behavior. The plugin metadata schema exposes the core knobs, but the full router configuration lives in `config.json`.
+The local dashboard can edit a small subset of those settings, currently `routing_strategy` and `show_routing_card`.
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -256,15 +267,22 @@ Or, without changing directories, pass an absolute path to the script:
 python /absolute/path/to/openmark-router/scripts/router.py --detect-providers --force-detect
 ```
 
-### Future Dashboard Scope
+### Dashboard Scope
 
-The planned dashboard should stay focused on high-signal controls and diagnostics:
+Current dashboard:
 
+- router health/version
 - detected providers/hosts currently available in OpenClaw
-- active benchmark categories and freshness
-- routing strategy selection
+- active benchmark categories and freshness visibility
+- `routing_strategy` selection
+- `show_routing_card` toggle
+- benchmark CSV import into the configured benchmarks directory
+- category-description modal from the loaded benchmark metadata
+
+Still planned for later:
+
 - manual routed-model lock/unlock
-- benchmark import status and validation hints
+- richer OpenMark-branded UX and broader controls
 
 ## CSV Format
 

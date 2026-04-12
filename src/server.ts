@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
+import { join } from 'node:path';
 import type {
   PluginLogger,
   PluginConfig,
 } from './types';
-import { previewRouteCategory, routeCategory, setPassthrough, restore, getCategories } from './router-bridge';
+import { describeCategories, detectAvailableProviders, routeCategory, setPassthrough, restore, getCategories, validateBenchmarkCsv } from './router-bridge';
 import { clearMainConversationSessionBindings, getUserOriginalModel } from './provider-inject';
+import { renderDashboardHtml } from './dashboard';
 
 let serverInstance: ReturnType<typeof createServer> | null = null;
 let restoreTimer: ReturnType<typeof setTimeout> | null = null;
@@ -23,6 +26,14 @@ const INTERNAL_PROMPT_MARKERS = [
   'openmark_classifier_internal',
 ];
 const ROUTING_BYPASS_COMMAND_PATTERN = /^\/[a-z0-9_]+(?:@\w+)?(?:\s|$)/i;
+const PLUGIN_VERSION = '7.0.0';
+const ROUTING_STRATEGIES = new Set([
+  'balanced',
+  'best_score',
+  'best_cost_efficiency',
+  'best_under_budget',
+  'best_under_latency',
+]);
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let _runtime: any = null;
@@ -80,13 +91,43 @@ async function handleRequest(
   pluginDir: string,
   logger: PluginLogger,
 ): Promise<void> {
-  if (req.method === 'GET' && req.url === '/v1/health') {
+  const requestUrl = new URL(req.url ?? '/', 'http://127.0.0.1');
+  const pathname = requestUrl.pathname;
+
+  if (req.method === 'GET' && pathname === '/v1/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', version: '7.0.0' }));
+    res.end(JSON.stringify({ status: 'ok', version: PLUGIN_VERSION }));
     return;
   }
 
-  if (req.method !== 'POST' || !req.url?.startsWith('/v1/chat/completions')) {
+  if (req.method === 'GET' && pathname === '/dashboard') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(renderDashboardHtml());
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/dashboard/api/state') {
+    const state = await buildDashboardState(config, pluginDir, logger);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(state));
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/dashboard/api/config') {
+    const result = await updateDashboardConfig(req, config, pluginDir, logger);
+    res.writeHead(result.status === 'ok' ? 200 : 400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/dashboard/api/import') {
+    const result = await importBenchmarkCsv(req, config, pluginDir, logger);
+    res.writeHead(result.status === 'ok' ? 200 : 400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return;
+  }
+
+  if (req.method !== 'POST' || !pathname.startsWith('/v1/chat/completions')) {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: { message: 'Not found', type: 'invalid_request' } }));
     return;
@@ -138,27 +179,17 @@ async function handleRequest(
 
   if (decision.kind === 'match') {
     logger.info(`[openmark-router] Classified as: ${decision.category}`);
-    const rec = await previewRouteCategory(decision.category, pluginDir, logger);
-
-    if (rec && rec.status === 'ok' && rec.card) {
-      const card = config.show_routing_card ? rec.card : '';
-      const primaryModel = typeof rec.model === 'string'
-        ? rec.model
-        : typeof rec.model_set === 'string'
-          ? rec.model_set
-          : '';
-      const fallbackModels = normalizeFallbackModels(rec.fallbacks);
-      logger.info(`[openmark-router] Preview-routed to: ${primaryModel}`);
-
-      logCompatibilityFallback(logger, `route match for ${decision.category}`);
-      const persistedRoute = await routeCategory(decision.category, pluginDir, logger);
-      if (persistedRoute && persistedRoute.status === 'ok') {
-        logger.info(`[openmark-router] Routed to: ${persistedRoute.model_set ?? persistedRoute.model}`);
-        scheduleRestore(config, pluginDir, logger);
-        const responseText = card || `Routed to ${persistedRoute.model_set ?? persistedRoute.model}. Send your message again.`;
-        sendTextResponse(res, responseText, Boolean(chatReq.stream));
-        return;
-      }
+    logCompatibilityFallback(logger, `route match for ${decision.category}`);
+    const persistedRoute = await routeCategory(decision.category, pluginDir, logger);
+    if (persistedRoute && persistedRoute.status === 'ok') {
+      logger.info(`[openmark-router] Routed to: ${persistedRoute.model_set ?? persistedRoute.model}`);
+      scheduleRestore(config, pluginDir, logger);
+      const routingCard = config.show_routing_card && typeof persistedRoute.card === 'string'
+        ? persistedRoute.card.trim()
+        : '';
+      const responseText = routingCard || `Routed to ${persistedRoute.model_set ?? persistedRoute.model}. Send your message again.`;
+      sendTextResponse(res, responseText, Boolean(chatReq.stream));
+      return;
     }
 
     logger.warn('[openmark-router] Routing command failed after successful classification');
@@ -189,6 +220,7 @@ export async function classifyMessage(
   config: PluginConfig,
   pluginDir: string,
   logger: PluginLogger,
+  runtimeConfig?: Record<string, unknown> | null,
 ): Promise<ClassificationDecision> {
   const categories = await loadCategories(pluginDir, logger);
   if (categories.length === 0) {
@@ -212,6 +244,7 @@ export async function classifyMessage(
       categories,
       classifierModel,
       logger,
+      runtimeConfig,
     );
     if (simpleCompletionDecision.kind !== 'error') {
       return simpleCompletionDecision;
@@ -399,6 +432,7 @@ async function classifyViaSimpleCompletion(
   categories: Array<{ name: string; display_name: string | null; description: string | null }>,
   classifierModel: string,
   logger: PluginLogger,
+  runtimeConfig?: Record<string, unknown> | null,
 ): Promise<ClassificationDecision> {
   const agentRuntimeBridge = resolveAgentRuntimeBridge();
   if (!agentRuntimeBridge) {
@@ -413,9 +447,11 @@ async function classifyViaSimpleCompletion(
   const prompt = buildClassifierPrompt(userMessage, categories);
 
   try {
-    const cfg = typeof _runtime?.config?.loadConfig === 'function'
-      ? await _runtime.config.loadConfig()
-      : undefined;
+    const cfg = runtimeConfig ?? (
+      typeof _runtime?.config?.loadConfig === 'function'
+        ? await _runtime.config.loadConfig()
+        : undefined
+    );
     const agentDir = cfg && typeof _runtime?.agent?.resolveAgentDir === 'function'
       ? _runtime.agent.resolveAgentDir(cfg)
       : undefined;
@@ -534,6 +570,275 @@ async function loadCategories(
   cachedCategories = await getCategories(pluginDir, logger);
   cachedCategoriesAt = now;
   return cachedCategories;
+}
+
+function resetCategoryCache(): void {
+  cachedCategories = [];
+  cachedCategoriesAt = 0;
+}
+
+type DashboardCategory = {
+  name: string;
+  display_name: string | null;
+  description: string | null;
+  models: number;
+  export_date: string | null;
+};
+
+function readRepoDashboardConfig(pluginDir: string, logger: PluginLogger): Record<string, unknown> {
+  const configPath = join(pluginDir, 'config.json');
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, 'utf-8'));
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn(`[openmark-router] Failed to read dashboard config.json: ${msg}`);
+    return {};
+  }
+}
+
+function writeRepoDashboardConfig(
+  pluginDir: string,
+  logger: PluginLogger,
+  configData: Record<string, unknown>,
+): void {
+  const configPath = join(pluginDir, 'config.json');
+  try {
+    writeFileSync(configPath, `${JSON.stringify(configData, null, 2)}\n`, 'utf-8');
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`[openmark-router] Failed to write config.json: ${msg}`);
+  }
+}
+
+function resolveBenchmarksDir(pluginDir: string, repoConfig: Record<string, unknown>): string {
+  const configured = typeof repoConfig.benchmarks_dir === 'string' && repoConfig.benchmarks_dir.trim()
+    ? repoConfig.benchmarks_dir.trim()
+    : 'benchmarks';
+  return join(pluginDir, configured);
+}
+
+function sanitizeBenchmarkFilename(filename: string): string {
+  const raw = filename.split(/[\\/]/).pop() ?? 'openmark-benchmark.csv';
+  const normalized = raw.replace(/[^a-zA-Z0-9._-]/g, '_');
+  return normalized.toLowerCase().endsWith('.csv') ? normalized : `${normalized}.csv`;
+}
+
+function summarizeCategoryFreshness(
+  categories: DashboardCategory[],
+  warningDays: number,
+): {
+  freshnessSummary: string;
+  oldestExportDate: string | null;
+  newestExportDate: string | null;
+  staleCount: number;
+} {
+  const dated = categories
+    .map(category => category.export_date ?? '')
+    .filter(Boolean)
+    .map(value => ({ raw: value, date: new Date(value) }))
+    .filter(entry => !Number.isNaN(entry.date.getTime()))
+    .sort((a, b) => a.date.getTime() - b.date.getTime());
+
+  if (dated.length === 0) {
+    return {
+      freshnessSummary: 'No export dates available',
+      oldestExportDate: null,
+      newestExportDate: null,
+      staleCount: 0,
+    };
+  }
+
+  const now = Date.now();
+  const staleCount = dated.filter(entry => {
+    const ageMs = now - entry.date.getTime();
+    return ageMs > warningDays * 24 * 60 * 60 * 1000;
+  }).length;
+
+  let freshnessSummary = 'Fresh';
+  if (staleCount > 0) {
+    freshnessSummary = `${staleCount} stale benchmark${staleCount === 1 ? '' : 's'}`;
+  }
+
+  return {
+    freshnessSummary,
+    oldestExportDate: dated[0]?.raw ?? null,
+    newestExportDate: dated[dated.length - 1]?.raw ?? null,
+    staleCount,
+  };
+}
+
+async function buildDashboardState(
+  config: PluginConfig,
+  pluginDir: string,
+  logger: PluginLogger,
+): Promise<Record<string, unknown>> {
+  const repoConfig = readRepoDashboardConfig(pluginDir, logger);
+  const categories = await describeCategories(pluginDir, logger);
+  const providers = await detectAvailableProviders(pluginDir, logger);
+  const freshnessWarningDays = typeof repoConfig.freshness_warning_days === 'number'
+    ? repoConfig.freshness_warning_days
+    : 30;
+  const freshness = summarizeCategoryFreshness(categories, freshnessWarningDays);
+
+  return {
+    status: 'ok',
+    version: PLUGIN_VERSION,
+    health: {
+      status: 'ok',
+      server_port: config.port,
+      gateway_port: config.gateway_port,
+    },
+    providers,
+    config: {
+      classifier_model: typeof repoConfig.classifier_model === 'string' ? repoConfig.classifier_model : config.classifier_model,
+      no_route_passthrough: typeof repoConfig.no_route_passthrough === 'string'
+        ? repoConfig.no_route_passthrough
+        : config.no_route_passthrough,
+      routing_strategy: typeof repoConfig.routing_strategy === 'string' ? repoConfig.routing_strategy : 'balanced',
+      show_routing_card: typeof repoConfig.show_routing_card === 'boolean'
+        ? repoConfig.show_routing_card
+        : config.show_routing_card,
+      restore_delay_s: typeof repoConfig.restore_delay_s === 'number' ? repoConfig.restore_delay_s : config.restore_delay_s,
+      gateway_port: typeof repoConfig.gateway_port === 'number' ? repoConfig.gateway_port : config.gateway_port,
+      benchmarks_dir: typeof repoConfig.benchmarks_dir === 'string' ? repoConfig.benchmarks_dir : 'benchmarks',
+      freshness_warning_days: freshnessWarningDays,
+    },
+    import: {
+      benchmarks_dir: typeof repoConfig.benchmarks_dir === 'string' ? repoConfig.benchmarks_dir : 'benchmarks',
+      benchmarks_path: resolveBenchmarksDir(pluginDir, repoConfig),
+      openmark_url: 'https://openmark.ai',
+      export_hint: 'OpenMark Results tab -> Export -> OpenClaw',
+    },
+    categories: {
+      count: categories.length,
+      items: categories,
+      freshness_summary: freshness.freshnessSummary,
+      stale_count: freshness.staleCount,
+      oldest_export_date: freshness.oldestExportDate,
+      newest_export_date: freshness.newestExportDate,
+    },
+  };
+}
+
+async function updateDashboardConfig(
+  req: IncomingMessage,
+  config: PluginConfig,
+  pluginDir: string,
+  logger: PluginLogger,
+): Promise<Record<string, unknown>> {
+  const body = await readBody(req);
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(body) as Record<string, unknown>;
+  } catch {
+    return { status: 'error', error: 'Invalid JSON payload' };
+  }
+
+  const nextConfig = readRepoDashboardConfig(pluginDir, logger);
+
+  if ('routing_strategy' in payload) {
+    const strategy = payload.routing_strategy;
+    if (typeof strategy !== 'string' || !ROUTING_STRATEGIES.has(strategy)) {
+      return { status: 'error', error: 'Invalid routing_strategy value' };
+    }
+    nextConfig.routing_strategy = strategy;
+  }
+
+  if ('show_routing_card' in payload) {
+    if (typeof payload.show_routing_card !== 'boolean') {
+      return { status: 'error', error: 'Invalid show_routing_card value' };
+    }
+    nextConfig.show_routing_card = payload.show_routing_card;
+    config.show_routing_card = payload.show_routing_card;
+  }
+
+  try {
+    writeRepoDashboardConfig(pluginDir, logger, nextConfig);
+    return {
+      status: 'ok',
+      message: 'Config updated',
+      config: {
+        routing_strategy: nextConfig.routing_strategy,
+        show_routing_card: nextConfig.show_routing_card,
+      },
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(msg);
+    return { status: 'error', error: 'Failed to write config.json' };
+  }
+}
+
+async function importBenchmarkCsv(
+  req: IncomingMessage,
+  config: PluginConfig,
+  pluginDir: string,
+  logger: PluginLogger,
+): Promise<Record<string, unknown>> {
+  const body = await readBody(req);
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(body) as Record<string, unknown>;
+  } catch {
+    return { status: 'error', error: 'Invalid JSON payload' };
+  }
+
+  const filename = typeof payload.filename === 'string' ? payload.filename.trim() : '';
+  const content = typeof payload.content === 'string' ? payload.content : '';
+  if (!filename) {
+    return { status: 'error', error: 'CSV filename is required' };
+  }
+  if (!content.trim()) {
+    return { status: 'error', error: 'CSV content is empty' };
+  }
+
+  const repoConfig = readRepoDashboardConfig(pluginDir, logger);
+  const benchmarksDir = resolveBenchmarksDir(pluginDir, repoConfig);
+  const safeFilename = sanitizeBenchmarkFilename(filename);
+  const tempPath = join(pluginDir, `.openmark-import-${Date.now()}-${randomUUID()}.csv`);
+  const targetPath = join(benchmarksDir, safeFilename);
+  const replaced = existsSync(targetPath);
+
+  try {
+    mkdirSync(benchmarksDir, { recursive: true });
+    writeFileSync(tempPath, content, 'utf-8');
+
+    const validation = await validateBenchmarkCsv(tempPath, pluginDir, logger);
+    if (!validation.valid) {
+      return {
+        status: 'error',
+        error: 'CSV validation failed',
+        validation,
+      };
+    }
+
+    writeFileSync(targetPath, content, 'utf-8');
+    resetCategoryCache();
+
+    return {
+      status: 'ok',
+      message: replaced ? 'Benchmark CSV replaced successfully' : 'Benchmark CSV imported successfully',
+      imported_filename: safeFilename,
+      replaced,
+      benchmarks_dir: typeof repoConfig.benchmarks_dir === 'string' ? repoConfig.benchmarks_dir : 'benchmarks',
+      benchmarks_path: benchmarksDir,
+      validation,
+      config: {
+        show_routing_card: config.show_routing_card,
+      },
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[openmark-router] Benchmark CSV import failed: ${msg}`);
+    return { status: 'error', error: 'Failed to import benchmark CSV' };
+  } finally {
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      // ignore temporary cleanup failures
+    }
+  }
 }
 
 async function loadCurrentConfig(logger: PluginLogger): Promise<Record<string, unknown> | null> {

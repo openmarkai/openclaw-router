@@ -199,6 +199,136 @@ export async function getCategories(
   }
 }
 
+export async function describeCategories(
+  pluginDir: string,
+  logger: PluginLogger,
+): Promise<Array<{
+  name: string;
+  display_name: string | null;
+  description: string | null;
+  models: number;
+  export_date: string | null;
+}>> {
+  const routerPath = join(pluginDir, 'scripts', 'router.py');
+  const configPath = join(pluginDir, 'config.json');
+
+  if (!existsSync(routerPath)) {
+    logger.debug(`[openmark-router] router.py not found at ${routerPath}`);
+    return [];
+  }
+
+  try {
+    const stdout = await execPython(
+      [routerPath, '--describe', '--config', configPath],
+      logger,
+    );
+
+    const result = JSON.parse(stdout);
+    if (result.action === 'describe' && Array.isArray(result.categories)) {
+      return result.categories;
+    }
+    if (Array.isArray(result.categories)) {
+      return result.categories;
+    }
+    return [];
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.debug(`[openmark-router] --describe failed: ${msg}`);
+    return [];
+  }
+}
+
+export async function detectAvailableProviders(
+  pluginDir: string,
+  logger: PluginLogger,
+  force = false,
+): Promise<{ providers: string[]; unmapped?: string[]; error?: string; cached_at?: string }> {
+  const routerPath = join(pluginDir, 'scripts', 'router.py');
+  const configPath = join(pluginDir, 'config.json');
+
+  if (!existsSync(routerPath)) {
+    logger.debug(`[openmark-router] router.py not found at ${routerPath}`);
+    return { providers: [] };
+  }
+
+  const args = [routerPath, '--detect-providers', '--config', configPath];
+  if (force) {
+    args.push('--force-detect');
+  }
+
+  try {
+    const stdout = await execPython(args, logger);
+    const result = JSON.parse(stdout) as {
+      providers?: string[];
+      unmapped?: string[];
+      error?: string;
+      cached_at?: string;
+    };
+    return {
+      providers: Array.isArray(result.providers) ? result.providers : [],
+      unmapped: Array.isArray(result.unmapped) ? result.unmapped : undefined,
+      error: typeof result.error === 'string' ? result.error : undefined,
+      cached_at: typeof result.cached_at === 'string' ? result.cached_at : undefined,
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.debug(`[openmark-router] --detect-providers failed: ${msg}`);
+    return { providers: [], error: msg };
+  }
+}
+
+export async function validateBenchmarkCsv(
+  csvPath: string,
+  pluginDir: string,
+  logger: PluginLogger,
+): Promise<{
+  valid: boolean;
+  errors?: string[];
+  warnings?: string[];
+  summary?: Record<string, unknown>;
+}> {
+  const routerPath = join(pluginDir, 'scripts', 'router.py');
+
+  if (!existsSync(routerPath)) {
+    logger.debug(`[openmark-router] router.py not found at ${routerPath}`);
+    return {
+      valid: false,
+      errors: ['router.py not found'],
+      warnings: [],
+      summary: {},
+    };
+  }
+
+  try {
+    const stdout = await execPython(
+      [routerPath, '--validate', csvPath],
+      logger,
+    );
+
+    const result = JSON.parse(stdout) as {
+      valid?: boolean;
+      errors?: string[];
+      warnings?: string[];
+      summary?: Record<string, unknown>;
+    };
+    return {
+      valid: result.valid === true,
+      errors: Array.isArray(result.errors) ? result.errors : [],
+      warnings: Array.isArray(result.warnings) ? result.warnings : [],
+      summary: result.summary && typeof result.summary === 'object' ? result.summary : {},
+    };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.debug(`[openmark-router] --validate failed: ${msg}`);
+    return {
+      valid: false,
+      errors: [msg],
+      warnings: [],
+      summary: {},
+    };
+  }
+}
+
 let pythonBinary: string | null = null;
 
 function findPython(): string {

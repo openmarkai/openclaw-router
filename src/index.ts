@@ -546,7 +546,13 @@ function registerCliRoutingHooks(
         logger.info('[openmark-router] before_agent_start short message — using passthrough model without classification');
         decision = { kind: 'none' };
       } else {
-        decision = await classifyMessage(prompt, config, pluginDir, logger);
+        decision = await classifyMessage(
+          prompt,
+          config,
+          pluginDir,
+          logger,
+          loadedConfig as Record<string, unknown>,
+        );
         if (decision.kind === 'error') {
           logger.warn(`[openmark-router] before_agent_start classification failed: ${decision.reason}`);
           return;
@@ -759,7 +765,13 @@ function registerBeforeDispatchHook(
         logger.info('[openmark-router] before_dispatch short message — using passthrough model without classification');
         decision = { kind: 'none' };
       } else {
-        decision = await classifyMessage(body, config, pluginDir, logger);
+        decision = await classifyMessage(
+          body,
+          config,
+          pluginDir,
+          logger,
+          loadedConfig as Record<string, unknown>,
+        );
         if (decision.kind === 'error') {
           logger.warn(`[openmark-router] before_dispatch classification failed: ${decision.reason}`);
           return { handled: true, text: 'Routing is temporarily unavailable. Please try again.' };
