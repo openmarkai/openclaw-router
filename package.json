@@ -1,7 +1,7 @@
 {
   "name": "openmark-router",
-  "version": "7.1.1",
-  "description": "Benchmark-driven model routing for OpenClaw, powered by OpenMark AI. Routes tasks to optimal models using real evaluation data.",
+  "version": "7.1.2",
+  "description": "Benchmark-driven model routing for OpenClaw, powered by OpenMark AI. Uses a bundled Python routing engine plus temporary OpenClaw model/session updates to keep same-turn routing aligned with benchmark data.",
   "license": "Apache-2.0",
   "author": "openmarkai",
   "homepage": "https://openmark.ai",
@@ -10,6 +10,9 @@
     "extensions": [
       "./dist/index.js"
     ],
+    "providers": [
+      "openmark"
+    ],
     "compat": {
       "pluginApi": ">=2026.2.0",
       "minGatewayVersion": "2026.3.28"
@@ -17,6 +20,9 @@
     "build": {
       "openclawVersion": "2026.3.28",
       "pluginSdkVersion": "2026.3.28"
+    },
+    "install": {
+      "minHostVersion": ">=2026.3.28"
     }
   },
   "scripts": {

@@ -13,6 +13,11 @@ openclaw gateway restart
 
 For normal published-plugin installs, that's it. The plugin auto-registers as a provider, sets `openmark/auto` as your default model, and starts routing.
 
+Published package note:
+
+- the shipped runtime package includes compiled `dist/` files plus the bundled Python router under `scripts/`
+- the Python router requires Python 3.8+ on the host
+
 ### Install From Source (development)
 
 Ignore this subsection unless you intentionally cloned this repository and want to run the plugin from source instead of installing the published plugin.
@@ -128,6 +133,21 @@ Compatibility fallback only: if the internal rerun path is unavailable, the plug
 ```
 
 **Zero API key access.** Classification goes through the OpenClaw gateway. The seamless hot path uses in-memory model overrides for the internal rerun, and the compatibility fallback can still write to OpenClaw's config. The plugin never makes direct calls to any provider API.
+
+## Runtime Access
+
+The plugin is not a passive benchmark viewer. To implement same-turn routing and compatibility fallback behavior, it intentionally does the following:
+
+- executes the bundled `scripts/router.py` via a local Python subprocess
+- reads and updates `~/.openclaw/openclaw.json` when injecting the provider and when compatibility fallback needs a persisted routed model stack
+- reads and updates `~/.openclaw/agents/main/sessions/` state for temporary session model binding and snapshot continuity during same-turn routed turns
+- temporarily overrides runtime model selection inside OpenClaw hooks for the duration of a routed reply
+
+What it does **not** do:
+
+- it does **not** read provider API keys directly
+- it does **not** make outbound provider API requests itself; OpenClaw handles model auth/execution
+- the Python routing engine does **not** depend on third-party pip packages and does **not** need external network calls to rank benchmark rows
 
 ## What Happens Per Message
 
@@ -351,7 +371,7 @@ openmark-router/
 
 - **Zero API key access**: The plugin never reads or stores API keys. All LLM calls go through the OpenClaw gateway.
 - **Clean install**: Python stdlib only for routing engine. No pip dependencies.
-- **Minimal file writes**: Writes provider config and model selection to `openclaw.json`. No other system modifications.
+- **Declared local writes**: The plugin may update `openclaw.json` plus main-session state under `~/.openclaw/agents/main/sessions/` to preserve same-turn routing continuity and compatibility fallback behavior.
 - **No network requests** from routing engine: All benchmark data is local CSV files.
 - **Isolated classification**: The classifier call uses only the current user message and category names -- no main-session history, no routed-model context, no borrowed system prompt state.
 - **No provider preference**: Classification and passthrough can use any model that OpenClaw can resolve. Small cheap models are encouraged.
