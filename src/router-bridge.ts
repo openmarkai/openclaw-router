@@ -373,7 +373,14 @@ function execPython(args: string[], logger: PluginLogger): Promise<string> {
         logger.debug(`[openmark-router] router.py stderr: ${stderr.slice(0, 500)}`);
       }
       if (err) {
-        reject(new Error(`${err.message}\nstderr: ${stderr}`));
+        const stdoutText = typeof stdout === 'string' ? stdout.trim() : '';
+        const stderrText = typeof stderr === 'string' ? stderr.trim() : '';
+        const detailParts = [
+          `command: ${python} ${args.join(' ')}`,
+          `stdout: ${stdoutText || '(empty)'}`,
+          `stderr: ${stderrText || '(empty)'}`,
+        ];
+        reject(new Error(`${err.message}\n${detailParts.join('\n')}`));
         return;
       }
       resolve(stdout.trim());

@@ -1,11 +1,13 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync, copyFileSync, renameSync, unlinkSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync, copyFileSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { randomBytes } from 'node:crypto';
 import type { PluginLogger, OpenClawConfig, PluginApi } from './types';
 
 const OPENCLAW_DIR = join(homedir(), '.openclaw');
 const OPENCLAW_CONFIG = join(OPENCLAW_DIR, 'openclaw.json');
 const MAIN_SESSION_STORE = join(OPENCLAW_DIR, 'agents', 'main', 'sessions', 'sessions.json');
+const MAIN_AGENT_MODELS = join(OPENCLAW_DIR, 'agents', 'main', 'agent', 'models.json');
 const AUTO_MODEL_ID = 'openmark/auto';
 
 function loadJsonFile(path: string): Record<string, unknown> {
@@ -24,6 +26,38 @@ function atomicWriteJson(path: string, data: unknown): void {
 }
 
 let userOriginalModel: string | null = null;
+
+function normalizeFallbacks(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .map(item => item.trim())
+    .filter(Boolean);
+}
+
+function isProviderConfigEquivalent(current: unknown, expected: { baseUrl: string; api: string; models: Array<{ id: string; name: string }> }): boolean {
+  if (!isObjectRecord(current)) {
+    return false;
+  }
+
+  const currentBaseUrl = typeof current.baseUrl === 'string' ? current.baseUrl : '';
+  const currentApi = typeof current.api === 'string' ? current.api : '';
+  const currentModels = Array.isArray(current.models)
+    ? current.models
+      .filter((item): item is Record<string, unknown> => isObjectRecord(item))
+      .map(item => ({
+        id: typeof item.id === 'string' ? item.id : '',
+        name: typeof item.name === 'string' ? item.name : '',
+      }))
+    : [];
+
+  return currentBaseUrl === expected.baseUrl
+    && currentApi === expected.api
+    && currentModels.length === expected.models.length
+    && currentModels.every((model, idx) => model.id === expected.models[idx]?.id && model.name === expected.models[idx]?.name);
+}
 
 /**
  * Get the user's real default model (the one they had before the
@@ -56,6 +90,14 @@ export function updateRuntimeModelConfig(
     const msg = err instanceof Error ? err.message : String(err);
     logger?.debug(`[openmark-router] Runtime default-model update failed: ${msg}`);
   }
+}
+
+function readRuntimeDefaultModel(api: PluginApi): { primary: string | null; fallbacks: string[] } {
+  const primary = typeof api.config?.agents?.defaults?.model?.primary === 'string'
+    ? api.config.agents.defaults.model.primary.trim()
+    : null;
+  const fallbacks = normalizeFallbacks(api.config?.agents?.defaults?.model?.fallbacks);
+  return { primary: primary || null, fallbacks };
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -184,6 +226,188 @@ export function clearSpecificSessionBinding(
   }
 }
 
+function lookupModelContextTokens(providerId: string, modelId: string): number | undefined {
+  if (!existsSync(MAIN_AGENT_MODELS)) {
+    return undefined;
+  }
+
+  try {
+    const registry = loadJsonFile(MAIN_AGENT_MODELS);
+    const providers = isObjectRecord(registry.providers) ? registry.providers : null;
+    const provider = providers && isObjectRecord(providers[providerId]) ? providers[providerId] : null;
+    const models = Array.isArray(provider?.models) ? provider.models : [];
+    const match = models.find(
+      (item): item is Record<string, unknown> =>
+        isObjectRecord(item) && typeof item.id === 'string' && item.id === modelId,
+    );
+    return typeof match?.contextWindow === 'number' ? match.contextWindow : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveProviderApi(providerId: string): string {
+  try {
+    if (existsSync(OPENCLAW_CONFIG)) {
+      const config = loadJsonFile(OPENCLAW_CONFIG);
+      const providers = isObjectRecord(config.models) && isObjectRecord(config.models.providers)
+        ? config.models.providers
+        : null;
+      const providerConfig = providers && isObjectRecord(providers[providerId]) ? providers[providerId] : null;
+      if (typeof providerConfig?.api === 'string' && providerConfig.api.trim()) {
+        return providerConfig.api.trim();
+      }
+    }
+  } catch {
+    // Fall through to known defaults.
+  }
+
+  switch (providerId) {
+    case 'google':
+      return 'google-generative-ai';
+    case 'openai':
+      return 'openai-responses';
+    case 'anthropic':
+      return 'anthropic-messages';
+    case 'openmark':
+      return 'openai-completions';
+    default:
+      return providerId;
+  }
+}
+
+function makeSessionEventId(): string {
+  return randomBytes(4).toString('hex');
+}
+
+function appendSessionModelSnapshot(
+  entry: Record<string, unknown>,
+  providerId: string,
+  modelId: string,
+): boolean {
+  const sessionId = typeof entry.sessionId === 'string' ? entry.sessionId.trim() : '';
+  if (!sessionId) {
+    return false;
+  }
+
+  const sessionFile = join(OPENCLAW_DIR, 'agents', 'main', 'sessions', `${sessionId}.jsonl`);
+  if (!existsSync(sessionFile)) {
+    return false;
+  }
+
+  const raw = readFileSync(sessionFile, 'utf-8');
+  const lines = raw.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  let parentId: string | null = null;
+  if (lines.length > 0) {
+    try {
+      const lastRecord = JSON.parse(lines[lines.length - 1]) as Record<string, unknown>;
+      parentId = typeof lastRecord.id === 'string' && lastRecord.id.trim() ? lastRecord.id.trim() : null;
+    } catch {
+      parentId = null;
+    }
+  }
+
+  const now = Date.now();
+  const timestamp = new Date(now).toISOString();
+  const snapshotId = makeSessionEventId();
+  const snapshotRecord = {
+    type: 'custom',
+    customType: 'model-snapshot',
+    data: {
+      timestamp: now,
+      provider: providerId,
+      modelApi: resolveProviderApi(providerId),
+      modelId,
+    },
+    id: snapshotId,
+    parentId,
+    timestamp,
+  };
+
+  const appendLines = [JSON.stringify(snapshotRecord)];
+  if (providerId === 'google') {
+    appendLines.push(JSON.stringify({
+      type: 'custom',
+      customType: 'google-turn-ordering-bootstrap',
+      data: { timestamp: now },
+      id: makeSessionEventId(),
+      parentId: snapshotId,
+      timestamp,
+    }));
+  }
+
+  appendFileSync(sessionFile, `${appendLines.join('\n')}\n`, 'utf-8');
+  return true;
+}
+
+export function setSpecificSessionBinding(
+  sessionKey: string,
+  providerId: string,
+  modelId: string,
+  logger: PluginLogger,
+  reason: 'same-turn-route',
+): boolean {
+  if (!sessionKey || !providerId || !modelId || !existsSync(MAIN_SESSION_STORE)) {
+    return false;
+  }
+
+  try {
+    const store = loadJsonFile(MAIN_SESSION_STORE);
+    if (!isObjectRecord(store)) {
+      return false;
+    }
+
+    const entry = store[sessionKey];
+    if (!isObjectRecord(entry)) {
+      return false;
+    }
+
+    let changed = false;
+    if (entry.providerOverride !== providerId) {
+      entry.providerOverride = providerId;
+      changed = true;
+    }
+    if (entry.modelOverride !== modelId) {
+      entry.modelOverride = modelId;
+      changed = true;
+    }
+
+    for (const staleKey of ['modelProvider', 'model', 'contextTokens']) {
+      if (staleKey in entry) {
+        delete entry[staleKey];
+        changed = true;
+      }
+    }
+
+    void lookupModelContextTokens(providerId, modelId);
+
+    const snapshotAppended = appendSessionModelSnapshot(entry, providerId, modelId);
+    if (snapshotAppended) {
+      logger.info(
+        `[openmark-router] Appended session snapshot for ${sessionKey} -> ${providerId}/${modelId}`,
+      );
+    } else {
+      logger.debug(
+        `[openmark-router] Session snapshot append skipped for ${sessionKey} (${providerId}/${modelId})`,
+      );
+    }
+
+    if (!changed) {
+      return true;
+    }
+
+    atomicWriteJson(MAIN_SESSION_STORE, store);
+    logger.info(
+      `[openmark-router] Bound session ${sessionKey} to ${providerId}/${modelId} during ${reason}`,
+    );
+    return true;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn(`[openmark-router] Failed to bind session ${sessionKey} during ${reason}: ${msg}`);
+    return false;
+  }
+}
+
 function originalModelPath(pluginDir: string): string {
   return join(pluginDir, '.user_default_model');
 }
@@ -251,6 +475,7 @@ export function injectProviderConfig(
     api: 'openai-completions',
     models: [{ id: 'auto', name: 'auto' }],
   };
+  let defaultChanged = false;
 
   try {
     if (!existsSync(OPENCLAW_DIR)) {
@@ -262,19 +487,41 @@ export function injectProviderConfig(
       config = loadJsonFile(OPENCLAW_CONFIG) as OpenClawConfig;
     }
 
-    if (!config.models) config.models = {};
-    if (!config.models.providers) config.models.providers = {};
-    config.models.providers['openmark'] = providerConfig;
+    const currentPrimary = config.agents?.defaults?.model?.primary;
+    const currentFallbacks = normalizeFallbacks(config.agents?.defaults?.model?.fallbacks);
+    const currentProviderConfig = config.models?.providers?.['openmark'];
+    const providerChanged = !isProviderConfigEquivalent(currentProviderConfig, providerConfig);
+    defaultChanged = currentPrimary !== AUTO_MODEL_ID || currentFallbacks.length > 0;
 
-    if (!config.agents) config.agents = {};
-    if (!config.agents.defaults) config.agents.defaults = {};
-    if (!config.agents.defaults.model) config.agents.defaults.model = {};
-    config.agents.defaults.model.primary = AUTO_MODEL_ID;
-    config.agents.defaults.model.fallbacks = [];
+    if (providerChanged || defaultChanged) {
+      if (!config.models) config.models = {};
+      if (!config.models.providers) config.models.providers = {};
+      config.models.providers['openmark'] = providerConfig;
 
-    atomicWriteJson(OPENCLAW_CONFIG, config);
-    logger.info('[openmark-router] Wrote provider config to openclaw.json');
-    logger.info(`[openmark-router] Default model set to ${AUTO_MODEL_ID}`);
+      if (!config.agents) config.agents = {};
+      if (!config.agents.defaults) config.agents.defaults = {};
+      if (!config.agents.defaults.model) config.agents.defaults.model = {};
+      config.agents.defaults.model.primary = AUTO_MODEL_ID;
+      config.agents.defaults.model.fallbacks = [];
+
+      atomicWriteJson(OPENCLAW_CONFIG, config);
+      logger.info('[openmark-router] Wrote provider config to openclaw.json');
+      if (defaultChanged) {
+        logger.info(`[openmark-router] Default model set to ${AUTO_MODEL_ID}`);
+      } else {
+        logger.debug('[openmark-router] Provider config refreshed; default model already openmark/auto');
+      }
+
+      // Only clear live-session overrides when taking over from a concrete default model.
+      // Re-running startup while already on openmark/auto should not wipe active Telegram/web sessions.
+      if (currentPrimary && currentPrimary !== AUTO_MODEL_ID) {
+        clearMainConversationSessionBindings(logger, 'startup');
+      } else {
+        logger.debug('[openmark-router] Startup reinjection skipped session-binding cleanup because the default was already openmark/auto');
+      }
+    } else {
+      logger.debug('[openmark-router] openclaw.json already matches the injected openmark provider config; skipping rewrite');
+    }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`[openmark-router] Failed to write provider config: ${msg}`);
@@ -285,13 +532,24 @@ export function injectProviderConfig(
       if (!api.config.models) api.config.models = {};
       if (!api.config.models.providers) api.config.models.providers = {};
       api.config.models.providers['openmark'] = providerConfig;
-      updateRuntimeModelConfig(api, AUTO_MODEL_ID, [], logger);
-      logger.debug('[openmark-router] Injected provider into runtime config');
+
+      const runtimeDefault = readRuntimeDefaultModel(api);
+      const shouldForceRuntimeAuto = defaultChanged
+        || !runtimeDefault.primary
+        || runtimeDefault.primary === AUTO_MODEL_ID
+        || runtimeDefault.fallbacks.length > 0;
+
+      if (shouldForceRuntimeAuto) {
+        updateRuntimeModelConfig(api, AUTO_MODEL_ID, [], logger);
+        logger.debug('[openmark-router] Injected provider into runtime config');
+      } else {
+        logger.debug(
+          `[openmark-router] Preserving concrete runtime default model ${runtimeDefault.primary} during provider reinjection`,
+        );
+      }
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.debug(`[openmark-router] Runtime config injection failed: ${msg}`);
   }
-
-  clearMainConversationSessionBindings(logger, 'startup');
 }

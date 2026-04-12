@@ -14,6 +14,7 @@ import {
   clearSpecificSessionBinding,
   getUserOriginalModel,
   injectProviderConfig,
+  setSpecificSessionBinding,
   updateRuntimeModelConfig,
 } from './provider-inject';
 import { classifyMessage, isRoutingBypassCommand, shouldBypassAutomaticRouting, startServer } from './server';
@@ -39,12 +40,21 @@ const RETRY_PROMPT_MARKERS = [
 ];
 const INTERNAL_SESSION_MARKERS = ['slug-generator', CLASSIFIER_SESSION_MARKER, CLASSIFIER_PROMPT_MARKER];
 const BEFORE_DISPATCH_DEDUPE_TTL_MS = 30_000;
+const SAME_TURN_ROUTE_TTL_MS = 30_000;
 let loggedResolveEventShape = false;
 let _replyRuntimeBridge: any | null | undefined = undefined;
 const recentBeforeDispatchReplies = new Map<string, number>();
 const pendingCliRouteCards = new Map<string, string>();
 const pendingCliRouteRestores = new Set<string>();
 const activeCliRoutedRuns = new Set<string>();
+let pendingSameTurnResolve:
+  | {
+    providerOverride?: string;
+    modelOverride: string;
+    messageSnippet: string;
+    expiresAt: number;
+  }
+  | null = null;
 
 function resolveConfigObject(raw: Record<string, unknown> | undefined): Record<string, unknown> {
   return (
@@ -691,6 +701,39 @@ function rememberBeforeDispatchHandled(key: string | null): void {
   recentBeforeDispatchReplies.set(key, Date.now());
 }
 
+function rememberSameTurnResolve(modelId: string, messageBody: string): void {
+  const { provider, model } = splitModelId(modelId);
+  pendingSameTurnResolve = {
+    providerOverride: provider,
+    modelOverride: model,
+    messageSnippet: messageBody.trim().toLowerCase().slice(0, 120),
+    expiresAt: Date.now() + SAME_TURN_ROUTE_TTL_MS,
+  };
+}
+
+function takePendingSameTurnResolve(summary: { joined: string }): PluginHookBeforeModelResolveResult | null {
+  if (!pendingSameTurnResolve) {
+    return null;
+  }
+
+  if (Date.now() > pendingSameTurnResolve.expiresAt) {
+    pendingSameTurnResolve = null;
+    return null;
+  }
+
+  const snippet = pendingSameTurnResolve.messageSnippet;
+  if (snippet && !summary.joined.includes(snippet)) {
+    return null;
+  }
+
+  const result: PluginHookBeforeModelResolveResult = {
+    providerOverride: pendingSameTurnResolve.providerOverride,
+    modelOverride: pendingSameTurnResolve.modelOverride,
+  };
+  pendingSameTurnResolve = null;
+  return result;
+}
+
 function registerBeforeDispatchHook(
   api: PluginApi,
   config: PluginConfig,
@@ -795,6 +838,9 @@ function registerBeforeDispatchHook(
           ? recommendation.card.trim()
           : '';
         logger.info(`[openmark-router] before_dispatch routed same turn to ${primaryModel}`);
+        if (primaryModel.toLowerCase() !== AUTO_MODEL_KEY) {
+          rememberSameTurnResolve(primaryModel, body);
+        }
       } else {
         logger.info(`[openmark-router] before_dispatch no route match — using ${primaryModel}`);
       }
@@ -809,27 +855,58 @@ function registerBeforeDispatchHook(
         primaryModel,
         fallbackModels,
       );
+      const sessionKey = typeof ctx?.sessionKey === 'string' ? ctx.sessionKey.trim() : '';
+      const primarySplit = splitModelId(primaryModel);
+      let sessionBindingApplied = false;
+      const runtimeModelApplied = primaryModel.toLowerCase() !== AUTO_MODEL_KEY;
+      if (
+        sessionKey
+        && primarySplit.provider
+        && primarySplit.model
+        && primaryModel.toLowerCase() !== AUTO_MODEL_KEY
+      ) {
+        sessionBindingApplied = setSpecificSessionBinding(
+          sessionKey,
+          primarySplit.provider,
+          primarySplit.model,
+          logger,
+          'same-turn-route',
+        );
+      }
+      if (runtimeModelApplied) {
+        updateRuntimeModelConfig(api, primaryModel, fallbackModels, logger);
+      }
       const dispatchContext = replyRuntimeBridge.finalizeInboundContext(buildBeforeDispatchContext(event, ctx));
-      const reply = await replyRuntimeBridge.getReplyFromConfig(
-        dispatchContext,
-        {
-          suppressTyping: true,
-          onModelSelected: (selected: { provider?: string; model?: string }) => {
-            logger.info(
-              `[openmark-router] before_dispatch reply selected ${selected.provider ?? 'unknown'}/${selected.model ?? 'unknown'}`,
-            );
+      let reply: unknown;
+      try {
+        reply = await replyRuntimeBridge.getReplyFromConfig(
+          dispatchContext,
+          {
+            suppressTyping: true,
+            onModelSelected: (selected: { provider?: string; model?: string }) => {
+              logger.info(
+                `[openmark-router] before_dispatch reply selected ${selected.provider ?? 'unknown'}/${selected.model ?? 'unknown'}`,
+              );
+            },
           },
-        },
-        configOverride,
-      );
+          configOverride,
+        );
+      } finally {
+        if (sessionBindingApplied && sessionKey) {
+          clearSpecificSessionBinding(sessionKey, logger, 'runtime-restore');
+        }
+        if (runtimeModelApplied) {
+          updateRuntimeModelConfig(api, AUTO_MODEL_KEY, [], logger);
+        }
+      }
 
       const replyText = replyPayloadsToText(reply);
       const finalText = [routingCard, replyText].filter(Boolean).join('\n\n').trim();
 
       if (!finalText) {
-        logger.warn('[openmark-router] before_dispatch produced no reply text');
+        logger.debug('[openmark-router] before_dispatch produced no reply text');
         rememberBeforeDispatchHandled(dedupeKey);
-        return { handled: true, text: routingCard || 'No reply generated for this request.' };
+        return { handled: true, text: routingCard || '' };
       }
 
       rememberBeforeDispatchHandled(dedupeKey);
@@ -928,6 +1005,17 @@ function registerRestoreHook(
         if (isInternalResolveEvent(summary)) {
           logger.debug('[openmark-router] Internal subagent/system resolve detected — skipping override/restore');
           return;
+        }
+
+        if (isLikelyUserConversationResolve(summary)) {
+          const pendingResolve = takePendingSameTurnResolve(summary);
+          if (pendingResolve) {
+            logger.info(
+              `[openmark-router] Re-applying same-turn concrete model handoff for ` +
+              `${pendingResolve.providerOverride ?? 'unknown'}/${pendingResolve.modelOverride ?? 'unknown'}`,
+            );
+            return pendingResolve;
+          }
         }
 
         const state = readRoutingState(pluginDir);
