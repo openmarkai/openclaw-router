@@ -2,7 +2,7 @@
 
 **Benchmark-driven model routing for [OpenClaw](https://github.com/openclaw/openclaw), powered by [OpenMark AI](https://openmark.ai).**
 
-Use benchmark-driven routing instead of guessing, complexity heuristics, or manual model switching. The router uses one lightweight semantic classification call to identify the task category, then deterministically picks the best model and fallbacks from your OpenMark benchmark data and lets the routed model generate the real reply.
+Use benchmark-driven routing instead of guessing, complexity heuristics, or manual model switching. The router uses one lightweight semantic classification call to identify the task category, then deterministically picks the best model and fallbacks from your OpenMark benchmark data and lets the routed model generate the real reply. In workloads where many requests do not actually need a flagship model, this can materially reduce spend while preserving or improving task quality, and some workloads may see savings on the order of 50-80% or more depending on task mix, provider availability, and benchmark results.
 
 ## Install (recommended)
 
@@ -35,6 +35,7 @@ The router now ships with a small local dashboard on the same embedded server.
 - It lets you edit `routing_strategy` and `show_routing_card`.
 - It can import benchmark CSVs directly into the configured benchmark directory and includes guidance for exporting those CSVs from [OpenMark AI](https://openmark.ai).
 - It can surface benchmark category descriptions directly from the dashboard.
+- It can delete imported benchmark CSVs from the configured benchmark directory.
 
 ## 30-Second Example
 
@@ -58,11 +59,23 @@ Strategy: balanced  |  Data: fresh
 
 The routed model genuinely answers. The classifier does not generate the final user-visible answer.
 
+## Validated Surfaces
+
+The seamless same-turn routing flow has been explicitly validated in:
+
+- OpenClaw CLI
+- OpenClaw Telegram
+
+Other OpenClaw surfaces may also work when they pass through the same provider and hook flow, but they have not been exhaustively validated yet.
+
 ## Why This Is Useful
+
+OpenMark Router helps you benchmark your real tasks, find better-fit models for them, and often reduce spend substantially. The biggest win usually comes from stopping the habit of sending every request to one expensive flagship model when your own benchmark data shows a smaller or cheaper model is already good enough for that category.
 
 - **Benchmark-driven, not heuristic routing**: task selection is based on semantic classification plus benchmark results on your own tasks, not on a simplistic `simple vs complex` split.
 - **Better model choice without manual switching**: the router picks the best benchmarked candidate and fallbacks on the fly.
 - **Routing adapts to what the user actually has configured**: it detects available providers/hosts, prefers direct provider keys first, and can fall back to OpenRouter keys when benchmark rows include them and OpenRouter is available.
+- **Single-provider setups still benefit**: you do not need a multi-provider stack. You can benchmark and route within one provider only if that is what your OpenClaw install uses.
 - **Classifier cost can stay negligible**: the classifier call is isolated and lightweight.
 - **A safe default path still exists**: Messages that don't have corresponding benchmarked tasks continue through the passthrough/default model path.
 - **Routing cards add useful visibility**: users can see which model was chosen, why, and when routing happened.
@@ -225,6 +238,15 @@ In practice, this means:
 - direct provider access is preferred when you already have it configured
 - OpenRouter can expand coverage when the benchmark includes `OC OR Key` values and your OpenClaw setup has OpenRouter access
 - users do **not** need every benchmarked model to be available through direct APIs if an OpenRouter path exists for those rows
+- users can also benchmark only one provider and still get useful routing within that provider's model lineup
+
+This also means the router is still useful when your setup is based on subscriptions, hosted access, OAuth-backed providers, or even free-model-heavy setups, as long as OpenClaw can execute the model ids involved. On many of those setups, flagship models also tend to be the first ones to feel expensive, constrained, or practically rate-limited, so routing can stretch the value of the access you already have by reserving premium models for the tasks that actually need them.
+
+Important billing caveat:
+
+- the router can improve model choice and often reduce spend substantially based on your benchmark data
+- in some workloads, especially when teams are overusing flagship models for routine tasks, benchmark-driven routing can reduce model spend by around 50-80% or more
+- provider billing, quota, and rate-limit behavior still depend on the provider and account type, so treat the exact savings as workload-dependent rather than guaranteed
 
 Important limitation:
 
@@ -277,6 +299,7 @@ Current dashboard:
 - `routing_strategy` selection
 - `show_routing_card` toggle
 - benchmark CSV import into the configured benchmarks directory
+- benchmark CSV deletion from the configured benchmarks directory
 - category-description modal from the loaded benchmark metadata
 
 Still planned for later:

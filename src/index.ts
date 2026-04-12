@@ -1,5 +1,5 @@
 import { dirname } from 'node:path';
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import type {
@@ -40,10 +40,12 @@ const RETRY_PROMPT_MARKERS = [
 ];
 const INTERNAL_SESSION_MARKERS = ['slug-generator', CLASSIFIER_SESSION_MARKER, CLASSIFIER_PROMPT_MARKER];
 const BEFORE_DISPATCH_DEDUPE_TTL_MS = 30_000;
+const BEFORE_DISPATCH_DEDUPE_PRUNE_INTERVAL_MS = 5_000;
 const SAME_TURN_ROUTE_TTL_MS = 30_000;
 let loggedResolveEventShape = false;
 let _replyRuntimeBridge: any | null | undefined = undefined;
 const recentBeforeDispatchReplies = new Map<string, number>();
+let lastBeforeDispatchDedupePruneAt = 0;
 const pendingCliRouteCards = new Map<string, string>();
 const pendingCliRouteRestores = new Set<string>();
 const activeCliRoutedRuns = new Set<string>();
@@ -56,6 +58,14 @@ let pendingSameTurnResolve:
   }
   | null = null;
 
+type RepoConfigCacheEntry = {
+  mtimeMs: number;
+  size: number;
+  value: Record<string, unknown>;
+};
+
+const repoConfigCache = new Map<string, RepoConfigCacheEntry>();
+
 function resolveConfigObject(raw: Record<string, unknown> | undefined): Record<string, unknown> {
   return (
     raw && typeof raw === 'object' && 'config' in raw && raw.config != null && typeof raw.config === 'object'
@@ -67,13 +77,26 @@ function resolveConfigObject(raw: Record<string, unknown> | undefined): Record<s
 function readRepoConfig(pluginDir: string, logger: PluginLogger): Record<string, unknown> {
   const configPath = join(pluginDir, 'config.json');
   if (!existsSync(configPath)) {
+    repoConfigCache.delete(configPath);
     return {};
   }
 
   try {
+    const stat = statSync(configPath);
+    const cached = repoConfigCache.get(configPath);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      return cached.value;
+    }
     const parsed = JSON.parse(readFileSync(configPath, 'utf-8'));
-    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+    const value = parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+    repoConfigCache.set(configPath, {
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      value,
+    });
+    return value;
   } catch (err: unknown) {
+    repoConfigCache.delete(configPath);
     const msg = err instanceof Error ? err.message : String(err);
     logger.warn(`[openmark-router] Failed to read config.json: ${msg}`);
     return {};
@@ -328,7 +351,9 @@ function cloneConfigWithModelOverride(
   primary: string,
   fallbacks: string[],
 ): Record<string, unknown> {
-  const cloned = JSON.parse(JSON.stringify(cfg ?? {})) as Record<string, unknown>;
+  const cloned = typeof structuredClone === 'function'
+    ? structuredClone(cfg ?? {}) as Record<string, unknown>
+    : JSON.parse(JSON.stringify(cfg ?? {})) as Record<string, unknown>;
   if (!cloned.agents || typeof cloned.agents !== 'object') cloned.agents = {};
   const agents = cloned.agents as Record<string, unknown>;
   if (!agents.defaults || typeof agents.defaults !== 'object') agents.defaults = {};
@@ -472,7 +497,9 @@ function isDirectCliRoutingContext(ctx: any, prompt: string): boolean {
 }
 
 function prependCardToAgentMessage(message: Record<string, unknown>, card: string): Record<string, unknown> {
-  const cloned = JSON.parse(JSON.stringify(message)) as Record<string, unknown>;
+  const cloned = typeof structuredClone === 'function'
+    ? structuredClone(message) as Record<string, unknown>
+    : JSON.parse(JSON.stringify(message)) as Record<string, unknown>;
   if (cloned.role !== 'assistant') {
     return cloned;
   }
@@ -685,9 +712,12 @@ function wasRecentlyHandledBeforeDispatch(key: string | null): boolean {
     return false;
   }
   const now = Date.now();
-  for (const [entryKey, timestamp] of recentBeforeDispatchReplies.entries()) {
-    if (now - timestamp > BEFORE_DISPATCH_DEDUPE_TTL_MS) {
-      recentBeforeDispatchReplies.delete(entryKey);
+  if (now - lastBeforeDispatchDedupePruneAt >= BEFORE_DISPATCH_DEDUPE_PRUNE_INTERVAL_MS) {
+    lastBeforeDispatchDedupePruneAt = now;
+    for (const [entryKey, timestamp] of recentBeforeDispatchReplies.entries()) {
+      if (now - timestamp > BEFORE_DISPATCH_DEDUPE_TTL_MS) {
+        recentBeforeDispatchReplies.delete(entryKey);
+      }
     }
   }
   const handledAt = recentBeforeDispatchReplies.get(key);

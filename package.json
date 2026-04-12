@@ -1,6 +1,6 @@
 {
   "name": "openmark-router",
-  "version": "7.1.0",
+  "version": "7.1.1",
   "description": "Benchmark-driven model routing for OpenClaw, powered by OpenMark AI. Routes tasks to optimal models using real evaluation data.",
   "license": "Apache-2.0",
   "author": "openmarkai",

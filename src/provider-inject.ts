@@ -7,7 +7,6 @@ import type { PluginLogger, OpenClawConfig, PluginApi } from './types';
 const OPENCLAW_DIR = join(homedir(), '.openclaw');
 const OPENCLAW_CONFIG = join(OPENCLAW_DIR, 'openclaw.json');
 const MAIN_SESSION_STORE = join(OPENCLAW_DIR, 'agents', 'main', 'sessions', 'sessions.json');
-const MAIN_AGENT_MODELS = join(OPENCLAW_DIR, 'agents', 'main', 'agent', 'models.json');
 const AUTO_MODEL_ID = 'openmark/auto';
 
 function loadJsonFile(path: string): Record<string, unknown> {
@@ -226,26 +225,6 @@ export function clearSpecificSessionBinding(
   }
 }
 
-function lookupModelContextTokens(providerId: string, modelId: string): number | undefined {
-  if (!existsSync(MAIN_AGENT_MODELS)) {
-    return undefined;
-  }
-
-  try {
-    const registry = loadJsonFile(MAIN_AGENT_MODELS);
-    const providers = isObjectRecord(registry.providers) ? registry.providers : null;
-    const provider = providers && isObjectRecord(providers[providerId]) ? providers[providerId] : null;
-    const models = Array.isArray(provider?.models) ? provider.models : [];
-    const match = models.find(
-      (item): item is Record<string, unknown> =>
-        isObjectRecord(item) && typeof item.id === 'string' && item.id === modelId,
-    );
-    return typeof match?.contextWindow === 'number' ? match.contextWindow : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 function resolveProviderApi(providerId: string): string {
   try {
     if (existsSync(OPENCLAW_CONFIG)) {
@@ -378,8 +357,6 @@ export function setSpecificSessionBinding(
         changed = true;
       }
     }
-
-    void lookupModelContextTokens(providerId, modelId);
 
     const snapshotAppended = appendSessionModelSnapshot(entry, providerId, modelId);
     if (snapshotAppended) {

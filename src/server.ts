@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
@@ -7,7 +7,7 @@ import type {
   PluginLogger,
   PluginConfig,
 } from './types';
-import { describeCategories, detectAvailableProviders, routeCategory, setPassthrough, restore, getCategories, validateBenchmarkCsv } from './router-bridge';
+import { describeCategories, detectAvailableProviders, routeCategory, setPassthrough, resetRouterBridgeCaches, restore, getCategories, validateBenchmarkCsv } from './router-bridge';
 import { clearMainConversationSessionBindings, getUserOriginalModel } from './provider-inject';
 import { renderDashboardHtml } from './dashboard';
 
@@ -26,7 +26,7 @@ const INTERNAL_PROMPT_MARKERS = [
   'openmark_classifier_internal',
 ];
 const ROUTING_BYPASS_COMMAND_PATTERN = /^\/[a-z0-9_]+(?:@\w+)?(?:\s|$)/i;
-const PLUGIN_VERSION = '7.1.0';
+const PLUGIN_VERSION = '7.1.1';
 const ROUTING_STRATEGIES = new Set([
   'balanced',
   'best_score',
@@ -40,6 +40,14 @@ let _runtime: any = null;
 let _agentRuntimeBridge: any | null | undefined = undefined;
 let _replyRuntimeBridge: any | null | undefined = undefined;
 let loggedCompatibilityFallback = false;
+
+type RepoDashboardConfigCacheEntry = {
+  mtimeMs: number;
+  size: number;
+  value: Record<string, unknown>;
+};
+
+const repoDashboardConfigCache = new Map<string, RepoDashboardConfigCacheEntry>();
 
 type ClassificationDecision =
   | { kind: 'match'; category: string }
@@ -596,9 +604,21 @@ type DashboardCategory = {
 function readRepoDashboardConfig(pluginDir: string, logger: PluginLogger): Record<string, unknown> {
   const configPath = join(pluginDir, 'config.json');
   try {
+    const stat = statSync(configPath);
+    const cached = repoDashboardConfigCache.get(configPath);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      return cached.value;
+    }
     const parsed = JSON.parse(readFileSync(configPath, 'utf-8'));
-    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+    const value = parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+    repoDashboardConfigCache.set(configPath, {
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      value,
+    });
+    return value;
   } catch (err: unknown) {
+    repoDashboardConfigCache.delete(configPath);
     const msg = err instanceof Error ? err.message : String(err);
     logger.warn(`[openmark-router] Failed to read dashboard config.json: ${msg}`);
     return {};
@@ -612,7 +632,14 @@ function writeRepoDashboardConfig(
 ): void {
   const configPath = join(pluginDir, 'config.json');
   try {
-    writeFileSync(configPath, `${JSON.stringify(configData, null, 2)}\n`, 'utf-8');
+    const serialized = `${JSON.stringify(configData, null, 2)}\n`;
+    writeFileSync(configPath, serialized, 'utf-8');
+    const stat = statSync(configPath);
+    repoDashboardConfigCache.set(configPath, {
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      value: configData,
+    });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`[openmark-router] Failed to write config.json: ${msg}`);
@@ -763,6 +790,7 @@ async function updateDashboardConfig(
 
   try {
     writeRepoDashboardConfig(pluginDir, logger, nextConfig);
+    resetRouterBridgeCaches(pluginDir);
     return {
       status: 'ok',
       message: 'Config updated',
@@ -823,6 +851,7 @@ async function importBenchmarkCsv(
 
     writeFileSync(targetPath, content, 'utf-8');
     resetCategoryCache();
+    resetRouterBridgeCaches(pluginDir);
 
     return {
       status: 'ok',
@@ -884,6 +913,7 @@ async function deleteBenchmarkCsv(
   try {
     unlinkSync(targetPath);
     resetCategoryCache();
+    resetRouterBridgeCaches(pluginDir);
     return {
       status: 'ok',
       message: categoryName

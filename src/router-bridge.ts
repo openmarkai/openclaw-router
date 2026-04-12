@@ -3,6 +3,54 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { PluginLogger, RouterRecommendation } from './types';
 
+type RouterPaths = {
+  routerPath: string;
+  configPath: string;
+};
+
+const routerPathsCache = new Map<string, RouterPaths>();
+const previewRouteCache = new Map<string, { expiresAt: number; result: RouterRecommendation }>();
+const PREVIEW_ROUTE_CACHE_TTL_MS = 60_000;
+
+function makePreviewRouteCacheKey(pluginDir: string, category: string): string {
+  return `${pluginDir}::${category.trim().toLowerCase()}`;
+}
+
+export function resetRouterBridgeCaches(pluginDir?: string): void {
+  if (!pluginDir) {
+    previewRouteCache.clear();
+    return;
+  }
+
+  const prefix = `${pluginDir}::`;
+  for (const key of previewRouteCache.keys()) {
+    if (key.startsWith(prefix)) {
+      previewRouteCache.delete(key);
+    }
+  }
+}
+
+function getRouterPaths(pluginDir: string): RouterPaths {
+  let cached = routerPathsCache.get(pluginDir);
+  if (!cached) {
+    cached = {
+      routerPath: join(pluginDir, 'scripts', 'router.py'),
+      configPath: join(pluginDir, 'config.json'),
+    };
+    routerPathsCache.set(pluginDir, cached);
+  }
+  return cached;
+}
+
+function getReadyRouterPaths(pluginDir: string, logger: PluginLogger, logLevel: 'error' | 'debug' = 'error'): RouterPaths | null {
+  const paths = getRouterPaths(pluginDir);
+  if (!existsSync(paths.routerPath)) {
+    logger[logLevel](`[openmark-router] router.py not found at ${paths.routerPath}`);
+    return null;
+  }
+  return paths;
+}
+
 /**
  * Call router.py --route <category> as a subprocess.
  * This WRITES the routed model + fallbacks to ~/.openclaw/openclaw.json
@@ -13,17 +61,14 @@ export async function routeCategory(
   pluginDir: string,
   logger: PluginLogger,
 ): Promise<RouterRecommendation | null> {
-  const routerPath = join(pluginDir, 'scripts', 'router.py');
-  const configPath = join(pluginDir, 'config.json');
-
-  if (!existsSync(routerPath)) {
-    logger.error(`[openmark-router] router.py not found at ${routerPath}`);
+  const paths = getReadyRouterPaths(pluginDir, logger, 'error');
+  if (!paths) {
     return null;
   }
 
   try {
     const stdout = await execPython(
-      [routerPath, '--route', category, '--config', configPath],
+      [paths.routerPath, '--route', category, '--config', paths.configPath],
       logger,
     );
 
@@ -45,23 +90,35 @@ export async function previewRouteCategory(
   pluginDir: string,
   logger: PluginLogger,
 ): Promise<RouterRecommendation | null> {
-  const routerPath = join(pluginDir, 'scripts', 'router.py');
-  const configPath = join(pluginDir, 'config.json');
+  const cacheKey = makePreviewRouteCacheKey(pluginDir, category);
+  const cached = previewRouteCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.result;
+  }
 
-  if (!existsSync(routerPath)) {
-    logger.error(`[openmark-router] router.py not found at ${routerPath}`);
+  const paths = getReadyRouterPaths(pluginDir, logger, 'error');
+  if (!paths) {
     return null;
   }
 
   try {
     const stdout = await execPython(
-      [routerPath, '--task', category, '--config', configPath],
+      [paths.routerPath, '--task', category, '--config', paths.configPath],
       logger,
     );
 
     const result = JSON.parse(stdout) as RouterRecommendation;
+    if (result && result.status === 'ok') {
+      previewRouteCache.set(cacheKey, {
+        expiresAt: Date.now() + PREVIEW_ROUTE_CACHE_TTL_MS,
+        result,
+      });
+    } else {
+      previewRouteCache.delete(cacheKey);
+    }
     return result;
   } catch (err: unknown) {
+    previewRouteCache.delete(cacheKey);
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`[openmark-router] router.py --task failed: ${msg}`);
     return null;
@@ -77,17 +134,14 @@ export async function setPassthrough(
   pluginDir: string,
   logger: PluginLogger,
 ): Promise<RouterRecommendation | null> {
-  const routerPath = join(pluginDir, 'scripts', 'router.py');
-  const configPath = join(pluginDir, 'config.json');
-
-  if (!existsSync(routerPath)) {
-    logger.error(`[openmark-router] router.py not found at ${routerPath}`);
+  const paths = getReadyRouterPaths(pluginDir, logger, 'error');
+  if (!paths) {
     return null;
   }
 
   try {
     const stdout = await execPython(
-      [routerPath, '--set-passthrough', passthroughModel, '--config', configPath],
+      [paths.routerPath, '--set-passthrough', passthroughModel, '--config', paths.configPath],
       logger,
     );
 
@@ -106,17 +160,14 @@ export async function restore(
   pluginDir: string,
   logger: PluginLogger,
 ): Promise<RouterRecommendation | null> {
-  const routerPath = join(pluginDir, 'scripts', 'router.py');
-  const configPath = join(pluginDir, 'config.json');
-
-  if (!existsSync(routerPath)) {
-    logger.error(`[openmark-router] router.py not found at ${routerPath}`);
+  const paths = getReadyRouterPaths(pluginDir, logger, 'error');
+  if (!paths) {
     return null;
   }
 
   try {
     const stdout = await execPython(
-      [routerPath, '--restore', '--config', configPath],
+      [paths.routerPath, '--restore', '--config', paths.configPath],
       logger,
     );
 
@@ -142,17 +193,14 @@ export async function matchAndRoute(
   pluginDir: string,
   logger: PluginLogger,
 ): Promise<RouterRecommendation | null> {
-  const routerPath = join(pluginDir, 'scripts', 'router.py');
-  const configPath = join(pluginDir, 'config.json');
-
-  if (!existsSync(routerPath)) {
-    logger.error(`[openmark-router] router.py not found at ${routerPath}`);
+  const paths = getReadyRouterPaths(pluginDir, logger, 'error');
+  if (!paths) {
     return null;
   }
 
   try {
     const stdout = await execPython(
-      [routerPath, '--match', userMessage, '--config', configPath],
+      [paths.routerPath, '--match', userMessage, '--config', paths.configPath],
       logger,
     );
 
@@ -173,17 +221,14 @@ export async function getCategories(
   pluginDir: string,
   logger: PluginLogger,
 ): Promise<Array<{ name: string; display_name: string | null; description: string | null }>> {
-  const routerPath = join(pluginDir, 'scripts', 'router.py');
-  const configPath = join(pluginDir, 'config.json');
-
-  if (!existsSync(routerPath)) {
-    logger.debug(`[openmark-router] router.py not found at ${routerPath}`);
+  const paths = getReadyRouterPaths(pluginDir, logger, 'debug');
+  if (!paths) {
     return [];
   }
 
   try {
     const stdout = await execPython(
-      [routerPath, '--classify', '--config', configPath],
+      [paths.routerPath, '--classify', '--config', paths.configPath],
       logger,
     );
 
@@ -210,17 +255,14 @@ export async function describeCategories(
   export_date: string | null;
   filename: string | null;
 }>> {
-  const routerPath = join(pluginDir, 'scripts', 'router.py');
-  const configPath = join(pluginDir, 'config.json');
-
-  if (!existsSync(routerPath)) {
-    logger.debug(`[openmark-router] router.py not found at ${routerPath}`);
+  const paths = getReadyRouterPaths(pluginDir, logger, 'debug');
+  if (!paths) {
     return [];
   }
 
   try {
     const stdout = await execPython(
-      [routerPath, '--describe', '--config', configPath],
+      [paths.routerPath, '--describe', '--config', paths.configPath],
       logger,
     );
 
@@ -244,15 +286,12 @@ export async function detectAvailableProviders(
   logger: PluginLogger,
   force = false,
 ): Promise<{ providers: string[]; unmapped?: string[]; error?: string; cached_at?: string }> {
-  const routerPath = join(pluginDir, 'scripts', 'router.py');
-  const configPath = join(pluginDir, 'config.json');
-
-  if (!existsSync(routerPath)) {
-    logger.debug(`[openmark-router] router.py not found at ${routerPath}`);
+  const paths = getReadyRouterPaths(pluginDir, logger, 'debug');
+  if (!paths) {
     return { providers: [] };
   }
 
-  const args = [routerPath, '--detect-providers', '--config', configPath];
+  const args = [paths.routerPath, '--detect-providers', '--config', paths.configPath];
   if (force) {
     args.push('--force-detect');
   }
@@ -288,10 +327,8 @@ export async function validateBenchmarkCsv(
   warnings?: string[];
   summary?: Record<string, unknown>;
 }> {
-  const routerPath = join(pluginDir, 'scripts', 'router.py');
-
-  if (!existsSync(routerPath)) {
-    logger.debug(`[openmark-router] router.py not found at ${routerPath}`);
+  const paths = getReadyRouterPaths(pluginDir, logger, 'debug');
+  if (!paths) {
     return {
       valid: false,
       errors: ['router.py not found'],
@@ -302,7 +339,7 @@ export async function validateBenchmarkCsv(
 
   try {
     const stdout = await execPython(
-      [routerPath, '--validate', csvPath],
+      [paths.routerPath, '--validate', csvPath],
       logger,
     );
 
