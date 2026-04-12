@@ -171,6 +171,13 @@ export function renderDashboardHtml(): string {
       min-width: 0;
     }
 
+    .brand-link {
+      display: inline-flex;
+      align-items: center;
+      color: inherit;
+      cursor: pointer;
+    }
+
     .brand-logo {
       display: block;
       width: 180px;
@@ -639,6 +646,7 @@ export function renderDashboardHtml(): string {
       width: 36px;
       height: 20px;
       flex: 0 0 auto;
+      cursor: pointer;
     }
 
     .toggle-input {
@@ -656,6 +664,7 @@ export function renderDashboardHtml(): string {
       border-radius: 20px;
       transition: all 0.25s ease;
       position: relative;
+      cursor: pointer;
     }
 
     .toggle-slider::before {
@@ -969,8 +978,10 @@ export function renderDashboardHtml(): string {
     <div class="sticky-shell">
       <header class="topbar">
         <div class="brand">
-          <div class="brand-logo">${LOGO_SVG}</div>
-          <div class="brand-mark">${ICON_SVG}</div>
+          <a class="brand-link" href="https://openmark.ai" target="_blank" rel="noreferrer" aria-label="Open OpenMark.ai">
+            <div class="brand-logo">${LOGO_SVG}</div>
+            <div class="brand-mark">${ICON_SVG}</div>
+          </a>
           <div class="badge">Router Dashboard</div>
         </div>
         <div class="topbar-actions">
