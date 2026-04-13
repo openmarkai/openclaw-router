@@ -84,7 +84,7 @@ OpenMark Router helps you benchmark your real tasks, find better-fit models for 
 - **Classifier cost can stay negligible**: the classifier call is isolated and lightweight.
 - **A safe default path still exists**: Messages that don't have corresponding benchmarked tasks continue through the passthrough/default model path.
 - **Routing cards add useful visibility**: users can see which model was chosen, why, and when routing happened.
-- **No plugin-side API key handling**: OpenClaw handles authentication, provider formatting, and model execution, the plugin does NOT access any API keys.
+- **OpenClaw-owned auth flow**: users do not hand provider API keys directly to the plugin. OpenClaw handles provider authentication, request formatting, and model execution.
 - **Your real default model is preserved**: the plugin captures your existing OpenClaw default model before switching the runtime default to `openmark/auto`.
 
 ## Quick Start
@@ -98,7 +98,7 @@ You can still place CSVs manually, but the local dashboard now also provides a C
 
 ## How It Works
 
-The plugin uses an **internal two-phase architecture**: Phase 1 classifies and routes, Phase 2 generates the real reply from the optimal model. To the user, this still appears as a single reply. OpenClaw handles all authentication and API formatting — the plugin never touches your API keys.
+The plugin uses an **internal two-phase architecture**: Phase 1 classifies and routes, Phase 2 generates the real reply from the optimal model. To the user, this still appears as a single reply. OpenClaw handles provider authentication and API formatting, and the plugin does not make direct provider API calls itself.
 
 ```
 Turn 1 — Classification & Routing
@@ -132,7 +132,7 @@ User receives one reply containing the routing card plus the answer from the bes
 Compatibility fallback only: if the internal rerun path is unavailable, the plugin can still persist the route and ask for a follow-up message
 ```
 
-**Zero API key access.** Classification goes through the OpenClaw gateway. The seamless hot path uses in-memory model overrides for the internal rerun, and the compatibility fallback can still write to OpenClaw's config. The plugin never makes direct calls to any provider API.
+**No direct provider API calls.** Classification goes through the OpenClaw gateway. The seamless hot path uses in-memory model overrides for the internal rerun, and the compatibility fallback can still write OpenClaw-managed routing state when needed. Provider authentication and model execution remain inside OpenClaw.
 
 ## Runtime Access
 
@@ -145,8 +145,8 @@ The plugin is not a passive benchmark viewer. To implement same-turn routing and
 
 What it does **not** do:
 
-- it does **not** read provider API keys directly
-- it does **not** make outbound provider API requests itself; OpenClaw handles model auth/execution
+- it does **not** ask users to paste provider API keys into plugin-specific settings
+- it does **not** make outbound provider API requests itself; OpenClaw handles provider auth/execution
 - the Python routing engine does **not** depend on third-party pip packages and does **not** need external network calls to rank benchmark rows
 
 ## What Happens Per Message
@@ -369,7 +369,7 @@ openmark-router/
 
 ## Trust and Security
 
-- **Zero API key access**: The plugin never reads or stores API keys. All LLM calls go through the OpenClaw gateway.
+- **OpenClaw-managed credentials**: users do not provide provider API keys directly to the plugin, and all model calls go through the OpenClaw gateway/runtime.
 - **Clean install**: Python stdlib only for routing engine. No pip dependencies.
 - **Declared local writes**: The plugin may update `openclaw.json` plus main-session state under `~/.openclaw/agents/main/sessions/` to preserve same-turn routing continuity and compatibility fallback behavior.
 - **No network requests** from routing engine: All benchmark data is local CSV files.

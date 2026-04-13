@@ -2,7 +2,7 @@
   "id": "openmark-router",
   "name": "OpenMark AI Model Router",
   "description": "Benchmark-driven model routing. Uses one isolated low-cost classification call, then lets the routed model produce the real reply on the same turn with benchmark-based model selection from OpenMark AI (https://openmark.ai). Ships with a bundled Python routing engine and performs temporary OpenClaw runtime, config, and session-state updates needed for same-turn routing continuity and compatibility fallback behavior. Captures your real default model for classifier/passthrough use, auto-detects available providers, prefers direct provider keys before OpenRouter fallback when available, works for single-provider, subscription-backed, OAuth-backed, and free-model-heavy setups too, and can often reduce spend substantially when tasks are overusing flagship models. Some workloads may see savings on the order of 50-80% or more depending on task mix and benchmark results. Includes a local dashboard for router health, providers, benchmark visibility, benchmark CSV import/deletion, category descriptions, and basic controls. Validated on OpenClaw CLI and Telegram; other surfaces may also work but are not yet exhaustively validated.",
-  "version": "7.1.2",
+  "version": "7.1.3",
   "configSchema": {
     "type": "object",
     "properties": {
