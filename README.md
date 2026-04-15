@@ -52,12 +52,12 @@ The router classifies the task, checks your benchmark results, chooses the best 
 
 ```
 Routed to gpt-5.4-nano (openai) — Content Creation Benchmark
-Score: 92.9%  |  $0.002731/call  |  30.28s
+Benchmark: 92.9% score  |  $0.002731/call  |  30.28s
 
-Alternative: deepseek-chat — 81.9% score, 72.3% cheaper
-  Over 10K calls: $7.57 vs $27.31
+Why this route: better score than gemini-3.1-pro, 97.6% cheaper, 4.2x faster
+Over 10K calls: $27.31 vs $1148.36
 
-Strategy: balanced  |  Data: fresh
+Strategy: balanced  |  Benchmark data: fresh
 
 [actual response from gpt-5.4-nano follows here...]
 ```

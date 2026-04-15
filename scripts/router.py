@@ -39,6 +39,8 @@ VIABILITY_GAP_PP = 15
 ALTERNATIVE_MIN_SAVINGS_PCT = 30
 TIE_THRESHOLD_PP = 1
 TIE_QUORUM_PCT = 0.8
+PRICIER_ANCHOR_MIN_RATIO = 1.5
+PRICIER_ANCHOR_SCORE_GRACE_PP = 1.0
 
 
 def load_config(config_path: str) -> dict:
@@ -177,6 +179,41 @@ def find_best_alternative(entries: list[dict]) -> dict | None:
     return max(candidates, key=lambda e: e["acc_per_dollar"])
 
 
+def find_pricier_anchor(entries: list[dict], primary_entry: dict) -> dict | None:
+    """
+    Find a pricier benchmark model that helps explain why the chosen route won.
+
+    Prefer higher-cost models that the routed winner matches or beats on score.
+    If no such model exists, allow a very small score gap so the comparison can
+    still read as a near-score tradeoff without becoming misleading.
+    """
+    if len(entries) < 2 or primary_entry["cost"] <= 0:
+        return None
+
+    def cost_ratio(entry: dict) -> float:
+        return entry["cost"] / max(primary_entry["cost"], 0.000001)
+
+    candidates = [
+        e for e in entries
+        if e["model"] != primary_entry["model"]
+        and e["cost"] > primary_entry["cost"]
+        and cost_ratio(e) >= PRICIER_ANCHOR_MIN_RATIO
+    ]
+    if not candidates:
+        return None
+
+    preferred = [e for e in candidates if e["score_pct"] <= primary_entry["score_pct"]]
+    if not preferred:
+        preferred = [
+            e for e in candidates
+            if e["score_pct"] <= primary_entry["score_pct"] + PRICIER_ANCHOR_SCORE_GRACE_PP
+        ]
+    if not preferred:
+        return None
+
+    return max(preferred, key=lambda e: (cost_ratio(e), e["score_pct"], -e["time_s"]))
+
+
 def compute_savings(top_entry: dict, alt_entry: dict) -> dict:
     """Compute projected savings between top model and alternative."""
     result = {}
@@ -196,6 +233,26 @@ def compute_savings(top_entry: dict, alt_entry: dict) -> dict:
         elif speed_ratio <= 0.83:
             result["speed_ratio"] = round(1.0 / speed_ratio, 1)
             result["alt_faster"] = False
+
+    return result
+
+
+def compute_route_anchor_metrics(anchor_entry: dict, primary_entry: dict) -> dict:
+    """Compute card-friendly comparison metrics between a pricier anchor and the routed winner."""
+    result = compute_savings(anchor_entry, primary_entry)
+
+    score_diff = round(primary_entry["score_pct"] - anchor_entry["score_pct"], 1)
+    if abs(score_diff) <= 0.1:
+        result["score_relation"] = "same"
+    elif score_diff > 0:
+        result["score_relation"] = "higher"
+        result["score_diff_pp"] = abs(score_diff)
+    elif abs(score_diff) <= PRICIER_ANCHOR_SCORE_GRACE_PP:
+        result["score_relation"] = "near"
+        result["score_diff_pp"] = abs(score_diff)
+    else:
+        result["score_relation"] = "lower"
+        result["score_diff_pp"] = abs(score_diff)
 
     return result
 
@@ -432,23 +489,15 @@ def route(task: str, config: dict, base_dir: str) -> dict:
         "reason": reason,
     }
 
+    anchor_entry = find_pricier_anchor(entries, ranked[0])
+    if anchor_entry:
+        result["route_anchor"] = format_model_entry(anchor_entry, available)
+        result["route_anchor"]["vs_primary"] = compute_route_anchor_metrics(anchor_entry, ranked[0])
+
     alt_entry = find_best_alternative(entries)
     if alt_entry and alt_entry["model"] != ranked[0]["model"]:
         result["best_alternative"] = format_model_entry(alt_entry, available)
         result["best_alternative"]["vs_top"] = compute_savings(ranked[0], alt_entry)
-    elif len(entries) >= 2:
-        most_expensive = max(
-            (e for e in entries if e["model"] != ranked[0]["model"]),
-            key=lambda e: e["cost"],
-            default=None,
-        )
-        if most_expensive and most_expensive["cost"] > 0 and ranked[0]["cost"] > 0:
-            ratio = round(most_expensive["cost"] / ranked[0]["cost"], 1)
-            if ratio >= 1.5:
-                result["cost_comparison"] = {
-                    "model": most_expensive["model"],
-                    "cost_ratio": ratio,
-                }
 
     dupes = detect_duplicates(all_benchmarks)
     if dupes:
@@ -665,8 +714,7 @@ def classify(config: dict, base_dir: str) -> dict:
 
 def format_routing_card(primary: dict, display_name: str | None,
                         strategy: str, freshness: dict,
-                        best_alt: dict | None,
-                        cost_comparison: dict | None = None) -> str:
+                        route_anchor: dict | None = None) -> str:
     """Generate pre-formatted routing card text."""
     model_name = primary.get("openmark_model", primary["model"])
     provider = primary["provider"]
@@ -674,31 +722,43 @@ def format_routing_card(primary: dict, display_name: str | None,
 
     lines = [
         f"Routed to {model_name} ({provider}) \u2014 {dn}",
-        f"Score: {primary['score_pct']}%  |  ${primary['cost']}/call  |  {primary['time_s']}s",
+        f"Benchmark: {primary['score_pct']}% score  |  ${primary['cost']}/call  |  {primary['time_s']}s",
     ]
 
-    alt_is_same = (best_alt and best_alt.get("model") == primary.get("model"))
-    if best_alt and best_alt.get("vs_top") and not alt_is_same:
-        vs = best_alt["vs_top"]
-        alt_model = best_alt.get("openmark_model", best_alt["model"])
-        alt_line = f"\nAlternative: {alt_model} \u2014 {best_alt['score_pct']}% score"
+    if route_anchor and route_anchor.get("vs_primary"):
+        vs = route_anchor["vs_primary"]
+        anchor_model = route_anchor.get("openmark_model", route_anchor["model"])
+        reasons = []
+        score_relation = vs.get("score_relation")
+        if score_relation == "higher":
+            reasons.append(f"better score than {anchor_model}")
+        elif score_relation in {"same", "near"}:
+            reasons.append(f"near {anchor_model} on score")
+        elif score_relation == "lower":
+            reasons.append(f"close to {anchor_model} on score")
+
         if vs.get("savings_pct"):
-            alt_line += f", {vs['savings_pct']}% cheaper"
+            reasons.append(f"{vs['savings_pct']}% cheaper")
         if vs.get("speed_ratio") and vs.get("alt_faster"):
-            alt_line += f", {vs['speed_ratio']}x faster"
+            reasons.append(f"{vs['speed_ratio']}x faster")
         elif vs.get("speed_ratio") and not vs.get("alt_faster"):
-            alt_line += f", {vs['speed_ratio']}x slower"
-        lines.append(alt_line)
+            reasons.append(f"{vs['speed_ratio']}x slower")
 
-        proj_top = vs.get("projected_10k_top", 0)
-        proj_alt = vs.get("projected_10k_alt", 0)
-        if abs(proj_top - proj_alt) > 1:
-            lines.append(f"Over 10K calls: ${proj_alt} vs ${proj_top}")
-
-    elif cost_comparison:
-        ratio = cost_comparison.get("cost_ratio", 0)
-        compared_to = cost_comparison.get("model", "next model")
-        lines.append(f"\n{model_name} is {ratio}x cheaper than {compared_to} \u2014 the clear winner.")
+        if reasons:
+            lines.append(f"\nWhy this route: {', '.join(reasons)}")
+            proj_anchor = vs.get("projected_10k_top", 0)
+            proj_primary = vs.get("projected_10k_alt", 0)
+            if abs(proj_anchor - proj_primary) > 1:
+                lines.append(f"Over 10K calls: ${proj_primary} vs ${proj_anchor}")
+    else:
+        fallback_reason = {
+            "best_score": "highest score in this benchmark",
+            "best_cost_efficiency": "best value among strong models in this benchmark",
+            "best_under_budget": "best score within your benchmark budget ceiling",
+            "best_under_latency": "best score within your benchmark latency ceiling",
+            "balanced": "best overall fit in this benchmark",
+        }.get(strategy, "best fit in this benchmark")
+        lines.append(f"\nWhy this route: {fallback_reason}")
 
     fresh_label = "fresh"
     if freshness.get("stale"):
@@ -706,7 +766,7 @@ def format_routing_card(primary: dict, display_name: str | None,
     elif freshness.get("days_old") is not None:
         fresh_label = f"{freshness['days_old']}d old" if freshness["days_old"] > 0 else "fresh"
 
-    lines.append(f"\nStrategy: {strategy}  |  Data: {fresh_label}")
+    lines.append(f"\nStrategy: {strategy}  |  Benchmark data: {fresh_label}")
 
     return "\n".join(lines)
 
@@ -893,8 +953,7 @@ def execute_route(category: str, config: dict, base_dir: str,
         display_name=result.get("display_name"),
         strategy=strategy,
         freshness=result.get("freshness", {}),
-        best_alt=result.get("best_alternative"),
-        cost_comparison=result.get("cost_comparison"),
+        route_anchor=result.get("route_anchor"),
     )
 
     output = {
@@ -943,8 +1002,7 @@ def execute_recommend(category: str, config: dict, base_dir: str,
         display_name=result.get("display_name"),
         strategy=strategy,
         freshness=result.get("freshness", {}),
-        best_alt=result.get("best_alternative"),
-        cost_comparison=result.get("cost_comparison"),
+        route_anchor=result.get("route_anchor"),
     )
 
     return {

@@ -26,7 +26,7 @@ const INTERNAL_PROMPT_MARKERS = [
   'openmark_classifier_internal',
 ];
 const ROUTING_BYPASS_COMMAND_PATTERN = /^\/[a-z0-9_]+(?:@\w+)?(?:\s|$)/i;
-const PLUGIN_VERSION = '7.1.3';
+const PLUGIN_VERSION = '7.1.4';
 const ROUTING_STRATEGIES = new Set([
   'balanced',
   'best_score',
