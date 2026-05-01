@@ -4,6 +4,16 @@
 
 Use benchmark-driven routing instead of guessing, complexity heuristics, or manual model switching. The router uses one lightweight semantic classification call to identify the task category, then deterministically picks the best model and fallbacks from your OpenMark benchmark data and lets the routed model generate the real reply. In workloads where many requests do not actually need a flagship model, this can materially reduce spend while preserving or improving task quality, and some workloads may see savings on the order of 50-80% or more depending on task mix, provider availability, and benchmark results.
 
+See the router in action below, or watch the short demo on YouTube.
+
+![Routing card demo](assets/routing-card-demo.png)
+
+## Demo
+
+[![Watch the demo](assets/readme-video-thumbnail.png)](https://www.youtube.com/watch?v=1egv9aOneg4)
+
+Watch the short demo on YouTube: [OpenMark Router demo](https://www.youtube.com/watch?v=1egv9aOneg4)
+
 ## Install (recommended)
 
 ```bash
@@ -34,6 +44,8 @@ If you change your real default model and want the router to use it for classifi
 ## Local Dashboard
 
 The router now ships with a small local dashboard on the same embedded server.
+
+![Dashboard overview](assets/dashboard-overview.png)
 
 - Open `http://127.0.0.1:2098/dashboard` by default, or use your configured `port`.
 - It currently shows router health, detected providers, benchmark categories/freshness, and a small config summary.
