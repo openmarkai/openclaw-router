@@ -1,8 +1,8 @@
 {
   "name": "openmark-router",
   "displayName": "OpenMark AI Model Router",
-  "description": "Benchmark-driven model routing for OpenClaw. Uses your own benchmark data to route tasks to better-fit models and reduce overuse of expensive flagship models.",
-  "version": "7.1.4",
+  "description": "Benchmark-driven model routing for OpenClaw. Uses your own benchmark data to route tasks to better-fit models and reduce overuse of expensive flagship models. Your OpenClaw agent can create the benchmarks itself through the OpenMark MCP server.",
+  "version": "7.2.0",
   "author": "openmarkai",
   "homepage": "https://openmark.ai",
   "repository": "https://github.com/openmarkai/openclaw-router",
@@ -20,7 +20,8 @@
     "fallback",
     "auto-routing",
     "provider-detection",
-    "openrouter"
+    "openrouter",
+    "mcp"
   ],
   "category": "productivity"
 }

@@ -1,6 +1,6 @@
 {
   "name": "openmark-router",
-  "version": "7.1.4",
+  "version": "7.2.0",
   "description": "Benchmark-driven model routing for OpenClaw. Uses your own benchmark data to route tasks to better-fit models and reduce overuse of expensive flagship models.",
   "license": "Apache-2.0",
   "author": "openmarkai",

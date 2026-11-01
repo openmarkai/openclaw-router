@@ -6,11 +6,13 @@ Use benchmark-driven routing instead of guessing, complexity heuristics, or manu
 
 See the router in action below, or watch the short demo on YouTube.
 
-![Routing card demo](assets/routing-card-demo.png)
+![Routing card demo](https://raw.githubusercontent.com/openmarkai/openclaw-router/master/assets/routing-card-demo.png)
+
+**New in 7.2:** your OpenClaw agent can create the benchmarks itself through the [OpenMark MCP server](https://openmark.ai/mcp#openclaw), and save the routing files straight into the router. See [Let Your OpenClaw Agent Create the Benchmarks](#let-your-openclaw-agent-create-the-benchmarks).
 
 ## Demo
 
-[![Watch the demo](assets/readme-video-thumbnail.png)](https://www.youtube.com/watch?v=1egv9aOneg4)
+[![Watch the demo](https://raw.githubusercontent.com/openmarkai/openclaw-router/master/assets/readme-video-thumbnail.png)](https://www.youtube.com/watch?v=1egv9aOneg4)
 
 Watch the short demo on YouTube: [OpenMark Router demo](https://www.youtube.com/watch?v=1egv9aOneg4)
 
@@ -45,12 +47,12 @@ If you change your real default model and want the router to use it for classifi
 
 The router now ships with a small local dashboard on the same embedded server.
 
-![Dashboard overview](assets/dashboard-overview.png)
+![Dashboard overview](https://raw.githubusercontent.com/openmarkai/openclaw-router/master/assets/dashboard-overview.png)
 
 - Open `http://127.0.0.1:2098/dashboard` by default, or use your configured `port`.
 - It currently shows router health, detected providers, benchmark categories/freshness, and a small config summary.
 - It lets you edit `routing_strategy` and `show_routing_card`.
-- It can import benchmark CSVs directly into the configured benchmark directory and includes guidance for exporting those CSVs from [OpenMark AI](https://openmark.ai).
+- It can import benchmark CSVs directly into the configured benchmark directory and includes guidance for exporting those CSVs from [OpenMark AI](https://openmark.ai), or for letting your agent create them through the OpenMark MCP server.
 - It can surface benchmark category descriptions directly from the dashboard.
 - It can delete imported benchmark CSVs from the configured benchmark directory.
 
@@ -107,6 +109,36 @@ OpenMark Router helps you benchmark your real tasks, find better-fit models for 
 4. **Done** -- the router activates automatically
 
 You can still place CSVs manually, but the local dashboard now also provides a CSV import flow with OpenMark export guidance.
+
+## Let Your OpenClaw Agent Create the Benchmarks
+
+Skip the export and copy steps: OpenClaw can connect to the [OpenMark MCP server](https://openmark.ai/mcp), so your agent writes the tests, runs them on OpenMark, and saves the results where the router reads them.
+
+1. **Create an OpenMark API key**: in the [OpenMark app](https://openmark.ai/ui/), account menu, then API keys. Put it in the environment as `OPENMARK_API_KEY`.
+2. **Add the server** to `~/.openclaw/openclaw.json`:
+
+   ```json
+   {
+     "mcp": {
+       "servers": {
+         "openmark": {
+           "url": "https://openmark.ai/mcp",
+           "transport": "streamable-http",
+           "headers": { "Authorization": "Bearer ${OPENMARK_API_KEY}" }
+         }
+       }
+     }
+   }
+   ```
+
+   Check it with `openclaw mcp doctor openmark --probe`.
+3. **Ask your agent**, for example:
+
+   > Benchmark my three most common tasks on OpenMark (support replies, invoice extraction, meeting summaries) on 6 models each, then save the routing files for the OpenMark router.
+
+The agent calls the OpenMark tools (task format, a free task check and cost estimate, the run, the results), then `export_openclaw_csv` for each finished job, and saves each file in `~/.openclaw/workspace/plugins/openmark-router/benchmarks/`. The router picks new files up within 5 minutes; no restart needed. Re-running a task replaces its file, so routing follows your latest results.
+
+The plugin itself is unchanged in what it touches: it still makes no network calls and only reads the local CSV files. Benchmarks use your OpenMark credits; free accounts start with free credits.
 
 ## How It Works
 
@@ -398,6 +430,7 @@ openmark-router/
 ## Links
 
 - **OpenMark AI** (benchmark platform): [openmark.ai](https://openmark.ai)
+- **OpenMark MCP server** (benchmarks from your agent): [openmark.ai/mcp](https://openmark.ai/mcp)
 - **OpenClaw** (agent framework): [github.com/openclaw/openclaw](https://github.com/openclaw/openclaw)
 - **ClawHub** (marketplace): [clawhub.ai](https://clawhub.ai)
 

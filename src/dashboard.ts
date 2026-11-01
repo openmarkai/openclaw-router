@@ -1163,6 +1163,11 @@ export function renderDashboardHtml(): string {
                     Export benchmarks from <a href="https://openmark.ai" target="_blank" rel="noreferrer">OpenMark.ai</a>
                     on the Results tab using Export -> OpenClaw. The router imports them into the configured benchmark directory dynamically.
                   </p>
+                  <p class="import-box-copy">
+                    Or let your OpenClaw agent do it: connect it to the
+                    <a href="https://openmark.ai/mcp#openclaw" target="_blank" rel="noreferrer">OpenMark MCP server</a>
+                    and ask it to benchmark your tasks and save the routing files here.
+                  </p>
                 </div>
                 <div class="badge mono" id="benchmarkDirBadge">benchmarks</div>
               </div>
