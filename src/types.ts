@@ -30,13 +30,13 @@ export interface PluginApi {
       | Promise<
         | PluginHookBeforeModelResolveResult
         | PluginHookBeforeDispatchResult
-        | PluginHookBeforeAgentStartResult
+        | PluginHookBeforePromptBuildResult
         | PluginHookBeforeMessageWriteResult
         | void
       >
       | PluginHookBeforeModelResolveResult
       | PluginHookBeforeDispatchResult
-      | PluginHookBeforeAgentStartResult
+      | PluginHookBeforePromptBuildResult
       | PluginHookBeforeMessageWriteResult
       | void,
     opts?: { priority?: number },
@@ -142,13 +142,11 @@ export interface PluginHookBeforeDispatchResult {
   text?: string;
 }
 
-export interface PluginHookBeforeAgentStartResult {
+export interface PluginHookBeforePromptBuildResult {
   systemPrompt?: string;
   prependContext?: string;
   prependSystemContext?: string;
   appendSystemContext?: string;
-  modelOverride?: string;
-  providerOverride?: string;
 }
 
 export interface PluginHookBeforeMessageWriteResult {

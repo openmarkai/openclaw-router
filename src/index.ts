@@ -49,6 +49,8 @@ let lastBeforeDispatchDedupePruneAt = 0;
 const pendingCliRouteCards = new Map<string, string>();
 const pendingCliRouteRestores = new Set<string>();
 const activeCliRoutedRuns = new Set<string>();
+// Routing-card instruction chosen in before_model_resolve, added in before_prompt_build of the same run
+const pendingCliPromptContext = new Map<string, string>();
 let pendingSameTurnResolve:
   | {
     providerOverride?: string;
@@ -538,6 +540,12 @@ function buildCliRoutingCardInstruction(card: string): string {
   ].join('\n');
 }
 
+function getCliPromptContextKeys(ctx: any): string[] {
+  const runId = typeof ctx?.runId === 'string' ? ctx.runId.trim() : '';
+  const routeKey = getCliRouteStateKey(ctx);
+  return [runId ? `run:${runId}` : '', routeKey ?? ''].filter(Boolean);
+}
+
 function registerCliRoutingHooks(
   api: PluginApi,
   config: PluginConfig,
@@ -549,7 +557,9 @@ function registerCliRoutingHooks(
   }
 
   try {
-    api.on('before_agent_start', async (event: any, ctx?: any) => {
+    // Priority below the restore hook (50): OpenClaw keeps the first model override,
+    // and the restore hook's classifier/same-turn overrides must keep winning.
+    api.on('before_model_resolve', async (event: any, ctx?: any) => {
       const prompt = typeof event?.prompt === 'string' ? event.prompt.trim() : '';
       const runId = typeof ctx?.runId === 'string' ? ctx.runId.trim() : '';
       if (runId && activeCliRoutedRuns.has(runId)) {
@@ -557,13 +567,13 @@ function registerCliRoutingHooks(
       }
       if (!isDirectCliRoutingContext(ctx, prompt)) {
         logger.debug(
-          `[openmark-router] before_agent_start: skipped direct CLI reroute ` +
+          `[openmark-router] cli route: skipped direct CLI reroute ` +
           `(channel=${String(ctx?.channelId ?? 'none')} sessionKey=${String(ctx?.sessionKey ?? 'none')} sessionId=${String(ctx?.sessionId ?? 'none')})`,
         );
         return;
       }
       logger.info(
-        `[openmark-router] before_agent_start: evaluating direct run ` +
+        `[openmark-router] cli route: evaluating direct run ` +
         `(channel=${String(ctx?.channelId ?? 'none')} sessionKey=${String(ctx?.sessionKey ?? 'none')} sessionId=${String(ctx?.sessionId ?? 'none')})`,
       );
 
@@ -580,7 +590,7 @@ function registerCliRoutingHooks(
       let decision: { kind: 'match' | 'none' | 'error'; category?: string; reason?: string };
 
       if (prompt.length < 10) {
-        logger.info('[openmark-router] before_agent_start short message — using passthrough model without classification');
+        logger.info('[openmark-router] cli route: short message, using passthrough model without classification');
         decision = { kind: 'none' };
       } else {
         decision = await classifyMessage(
@@ -591,7 +601,7 @@ function registerCliRoutingHooks(
           loadedConfig as Record<string, unknown>,
         );
         if (decision.kind === 'error') {
-          logger.warn(`[openmark-router] before_agent_start classification failed: ${decision.reason}`);
+          logger.warn(`[openmark-router] cli route: classification failed: ${decision.reason}`);
           return;
         }
       }
@@ -599,7 +609,7 @@ function registerCliRoutingHooks(
       if (decision.kind === 'match' && decision.category) {
         const recommendation = await previewRouteCategory(decision.category, pluginDir, logger);
         if (!recommendation || recommendation.status !== 'ok') {
-          logger.warn('[openmark-router] before_agent_start route preview failed');
+          logger.warn('[openmark-router] cli route: route preview failed');
           return;
         }
         primaryModel = typeof recommendation.model === 'string'
@@ -611,9 +621,9 @@ function registerCliRoutingHooks(
         routingCard = config.show_routing_card && typeof recommendation.card === 'string'
           ? recommendation.card.trim()
           : '';
-        logger.info(`[openmark-router] before_agent_start routed current CLI turn to ${primaryModel}`);
+        logger.info(`[openmark-router] cli route: routed current CLI turn to ${primaryModel}`);
       } else {
-        logger.info(`[openmark-router] before_agent_start no route match — using ${primaryModel}`);
+        logger.info(`[openmark-router] cli route: no route match, using ${primaryModel}`);
       }
 
       if (!primaryModel || primaryModel.toLowerCase() === AUTO_MODEL_KEY) {
@@ -635,12 +645,25 @@ function registerCliRoutingHooks(
       }
 
       const { provider, model } = splitModelId(primaryModel);
-      const cliRoutingInstruction = routingCard ? buildCliRoutingCardInstruction(routingCard) : undefined;
+      if (routingCard) {
+        const instruction = buildCliRoutingCardInstruction(routingCard);
+        for (const key of getCliPromptContextKeys(ctx)) {
+          pendingCliPromptContext.set(key, instruction);
+        }
+      }
       return {
         providerOverride: provider,
         modelOverride: model,
-        appendSystemContext: cliRoutingInstruction,
       };
+    }, { priority: 40 });
+
+    api.on('before_prompt_build', (_event: any, ctx?: any) => {
+      const keys = getCliPromptContextKeys(ctx);
+      const instruction = keys.map((key) => pendingCliPromptContext.get(key)).find(Boolean);
+      for (const key of keys) {
+        pendingCliPromptContext.delete(key);
+      }
+      return instruction ? { appendSystemContext: instruction } : undefined;
     }, { priority: 70 });
 
     api.on('before_message_write', (event: any, ctx?: any) => {
@@ -666,6 +689,9 @@ function registerCliRoutingHooks(
 
     api.on('agent_end', async (_event: any, ctx?: any) => {
       const routeKey = getCliRouteStateKey(ctx);
+      for (const key of getCliPromptContextKeys(ctx)) {
+        pendingCliPromptContext.delete(key);
+      }
       if (typeof ctx?.runId === 'string' && ctx.runId.trim()) {
         activeCliRoutedRuns.delete(ctx.runId.trim());
       }
